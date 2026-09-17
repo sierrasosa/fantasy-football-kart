@@ -4,6 +4,7 @@ import streamlit as st
 # Sleeper recommends fetching players at most once per day due to payload size
 @st.cache_data(ttl=86400)
 def get_nfl_players():
+    print("🔥 CACHE MISS: Downloading players from Sleeper API...")
     """Fetches full NFL player database from Sleeper and filters to skill positions."""
     url = "https://api.sleeper.app/v1/players/nfl"
     response = requests.get(url)
