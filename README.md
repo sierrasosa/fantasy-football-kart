@@ -1,6 +1,3 @@
-Current project status/plan:
-
-```markdown
 # 🏎️ Fantasy Football Kart League
 
 A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leagues. Built with Streamlit, Supabase, and Python.
@@ -52,7 +49,6 @@ Create a `.streamlit/secrets.toml` file in your root directory:
 ```toml
 SUPABASE_URL = "[https://your-project-ref.supabase.co](https://your-project-ref.supabase.co)"
 SUPABASE_KEY = "your-anon-public-key"
-SUPABASE_SERVICE_KEY = "your-service-role-secret-key"
 SLEEPER_LEAGUE_ID = "your-sleeper-league-id"
 
 ```
@@ -137,17 +133,8 @@ streamlit run app.py
 
 ## 🚀 Deployment (Streamlit Community Cloud)
 
-1. Push your code to GitHub:
-```bash
-git add .
-git commit -m "Complete local MVP with Supabase sync"
-git push origin main
-
-```
-
-
-2. Log into [share.streamlit.io](https://share.streamlit.io/).
-3. Select **New app** $\rightarrow$ choose your repository and branch (`main`).
-4. Set **Main file path** to `app.py`.
-5. Under **Advanced settings...** $\rightarrow$ **Secrets**, paste your `.streamlit/secrets.toml` content (excluding `SUPABASE_SERVICE_KEY` if not needed in production).
-6. Click **Deploy!**
+1. Log into [share.streamlit.io](https://share.streamlit.io/).
+2. Select **New app** $\rightarrow$ choose your repository and branch (`main`).
+3. Set **Main file path** to `app.py`.
+4. Under **Advanced settings...** $\rightarrow$ **Secrets**, paste your `.streamlit/secrets.toml` content (excluding `SUPABASE_SERVICE_KEY` if not needed in production).
+5. Click **Deploy!**
