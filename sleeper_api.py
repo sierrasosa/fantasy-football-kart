@@ -100,3 +100,44 @@ def get_league_rosters(league_id: str):
     url = f"{BASE_URL}/league/{league_id}/rosters"
     response = requests.get(url)
     return response.json() if response.status_code == 200 else []
+
+def get_roster_players(league_id: str, roster_id: int) -> List[Dict[str, Any]]:
+    """
+    Fetches active roster players for a specific roster_id in a Sleeper league.
+    Returns a list of dicts with player details (id, name, pos, team, years_exp).
+    """
+    # 1. Fetch all league rosters
+    rosters_url = f"{BASE_URL}/league/{league_id}/rosters"
+    rosters_res = requests.get(rosters_url)
+    if rosters_res.status_code != 200:
+        return []
+
+    rosters = rosters_res.json()
+    target_roster = next((r for r in rosters if r.get("roster_id") == roster_id), None)
+    
+    if not target_roster or not target_roster.get("players"):
+        return []
+
+    # 2. Fetch master player dictionary
+    all_players = get_all_nfl_players()
+
+    # 3. Format active roster players
+    roster_player_ids = target_roster.get("players", [])
+    starter_ids = set(target_roster.get("starters", []))
+
+    player_list = []
+    for p_id in roster_player_ids:
+        player_info = all_players.get(str(p_id), {})
+        
+        full_name = player_info.get("full_name") or f"{player_info.get('first_name', '')} {player_info.get('last_name', '')}".strip() or f"Player {p_id}"
+        
+        player_list.append({
+            "id": str(p_id),
+            "name": full_name,
+            "pos": player_info.get("position", "N/A"),
+            "team": player_info.get("team") or "FA",
+            "years_exp": player_info.get("years_exp", 0),
+            "is_starter": str(p_id) in starter_ids
+        })
+
+    return player_list
