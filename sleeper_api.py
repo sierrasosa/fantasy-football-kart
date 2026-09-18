@@ -1,28 +1,25 @@
 import requests
 import streamlit as st
 
-# Base URLs for Sleeper API and CDN
 BASE_URL = "https://api.sleeper.app/v1"
 AVATAR_CDN_URL = "https://sleepercdn.com/avatars"
 UPLOADS_CDN_URL = "https://sleepercdn.com/uploads"
 
-def get_avatar_url(avatar_id: str | None, thumbnail: bool = True) -> str:
+# Replaced (avatar_id: str | None) with Optional[str]
+def get_avatar_url(avatar_id: Optional[str] = None, thumbnail: bool = True) -> str:
     """
-    Constructs the Sleeper CDN avatar URL. Handles custom uploads, 
+    Constructs the Sleeper CDN avatar URL. Handles custom uploads,
     standard avatars, and full image URLs seamlessly.
     """
     if not avatar_id:
         return "https://sleepercdn.com/images/v2/placeholder_avatar.png"
-    
-    # If it's already a full HTTP URL (e.g. metadata.avatar)
+
     if str(avatar_id).startswith("http"):
         return avatar_id
-    
-    # If avatar_id is a custom upload hash or path
+
     if "uploads/" in str(avatar_id):
         return f"https://sleepercdn.com/{avatar_id}"
 
-    # Standard Sleeper account avatar ID
     if thumbnail:
         return f"{AVATAR_CDN_URL}/thumbs/{avatar_id}"
     return f"{AVATAR_CDN_URL}/{avatar_id}"
