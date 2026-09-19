@@ -3,3 +3,5 @@ ffenv/
 __pycache__/
 *.pyc
 .env
+players.json
+*.ipynb

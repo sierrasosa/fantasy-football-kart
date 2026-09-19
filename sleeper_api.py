@@ -1,5 +1,8 @@
 import requests
+import json
+import os
 import streamlit as st
+from typing import Optional, List, Dict, Any
 
 BASE_URL = "https://api.sleeper.app/v1"
 AVATAR_CDN_URL = "https://sleepercdn.com/avatars"
@@ -61,16 +64,20 @@ def get_league_users_avatar_map(league_id: str, thumbnail: bool = True) -> dict[
 
 # Sleeper recommends fetching players at most once per day due to payload size
 @st.cache_data(ttl=86400)
-def get_nfl_players():
-    """Temporary mock data to skip external Sleeper API network requests during testing."""
-    return {
-        "4034": {"name": "Christian McCaffrey", "pos": "RB", "team": "SF"},
-        "4881": {"name": "Lamar Jackson", "pos": "QB", "team": "BAL"},
-        "6794": {"name": "Justin Jefferson", "pos": "WR", "team": "MIN"},
-        "4984": {"name": "Josh Allen", "pos": "QB", "team": "BUF"},
-        "5849": {"name": "A.J. Brown", "pos": "WR", "team": "PHI"}
-    }
-    print('Using temporary fake player data')
+def get_nfl_players() -> dict:
+    """
+    Reads local players.json snapshot file to skip external Sleeper API requests.
+    Caches result for 24 hours.
+    """
+    file_path = "players.json"
+    
+    if not os.path.exists(file_path):
+        st.error(f"⚠️ '{file_path}' not found in root directory. Please upload your snapshot file.")
+        return {}
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
     # print("🔥 CACHE MISS: Downloading players from Sleeper API...")
     # """Fetches full NFL player database from Sleeper and filters to skill positions."""
     # url = "https://api.sleeper.app/v1/players/nfl"

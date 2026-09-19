@@ -2,7 +2,10 @@ import hashlib
 import sleeper_api
 import scoring
 import streamlit as st
+import pandas as pd
 import item_engine
+import os
+import json
 from datetime import datetime, timedelta
 from supabase import Client, create_client
 
@@ -237,7 +240,7 @@ with tab1:
                     )
 
                 with col_avatar:
-                    st.image(t_avatar, use_container_width=True)
+                    st.image(t_avatar, width="stretch")
 
                 with col_details:
                     col_info, col_metric = st.columns([2, 1])
@@ -324,7 +327,7 @@ with tab2:
                     )
 
                 with col_avatar:
-                    st.image(t_avatar, use_container_width=True)
+                    st.image(t_avatar, width="stretch")
 
                 with col_details:
                     col_info, col_metric = st.columns([2, 1])
@@ -461,43 +464,74 @@ if current_weekday >= 1:  # Tuesday (1) through Sunday (6)
 with tab4:
     st.header("🏈 NFL Player Database")
 
-    # Check for active event indicators (e.g., Remix or Rookie of the Week)
-    is_rookie_week = active_event and active_event.get("event_name") == "Rookie of the Week"
-    is_remix_week = active_event and active_event.get("event_name") == "Remix"
+    pruned_file_path = "pruned_players.json"
 
-    filtered_players = []
-    for p_id, p in players_data.items():
-        pos = p.get("pos")
-        team = p.get("team")
-        name = p.get("name", "")
-        years_exp = p.get("years_exp", 0)
+if not os.path.exists(pruned_file_path):
+    st.error(f"⚠️ `{pruned_file_path}` not found in root directory.")
+else:
+    with open(pruned_file_path, "r", encoding="utf-8") as f:
+        pruned_players = json.load(f)
 
-        if pos not in ["QB", "RB", "WR", "TE", "K", "DEF"]:
-            continue
+    # 2. Format player data into tabular format
+    formatted_players = []
+    for p_id, info in pruned_players.items():
+        if isinstance(info, dict):
+            full_name = (
+                info.get("full_name")
+                or f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
+                or f"Player {p_id}"
+            )
+            
+            years_exp = info.get("years_exp")
+            is_rookie = "Yes" if years_exp == 0 or years_exp == "0" else "No"
+            
+            formatted_players.append({
+                "Name": full_name,
+                "Position": info.get("position") or "N/A",
+                "Team": info.get("team") or "FA",
+                "Rookie": is_rookie,
+                "Depth Chart Order": info.get("depth_chart_order", "N/A"),
+                "Injury Status": info.get("injury_status") or "Active",
+                "Status": info.get("status") or "Active",
+            })
 
-        status_tag = "ACTIVE"
-        if is_rookie_week and years_exp == 0:
-            status_tag = "⭐ ROOKIE (SUPERCHARGED)"
-        elif is_remix_week and p.get("is_top_banned"):
-            status_tag = "🚫 BANNED (REMIX)"
+    df_players = pd.DataFrame(formatted_players)
 
-        filtered_players.append({
-            "Status": status_tag,
-            "Name": name,
-            "Position": pos,
-            "NFL Team": team or "FA",
-            "Age": p.get("age", "N/A"),
-        })
+    # Clean depth chart order column for proper sorting
+    if "Depth Chart Order" in df_players.columns:
+        df_players["Depth Chart Order"] = pd.to_numeric(
+            df_players["Depth Chart Order"], errors="coerce"
+        ).astype("Int64")
+        df_players = df_players.sort_values(
+            by=["Team", "Depth Chart Order", "Name"],
+            na_position="last"
+        )
 
-    st.dataframe(
-        filtered_players[:200],
-        column_config={
-            "Status": st.column_config.TextColumn("Status / Indicator", width="medium"),
-            "Name": st.column_config.TextColumn("Player", width="medium"),
-        },
-        use_container_width=True,
-        hide_index=True,
-    )
+    # 3. Add Search Bar
+    search_query = st.text_input("🔍 Search players by name, team, or position:", "")
+    
+    if search_query:
+        query = search_query.strip().lower()
+        mask = (
+            df_players["Name"].str.lower().str.contains(query, na=False) |
+            df_players["Team"].str.lower().str.contains(query, na=False) |
+            df_players["Position"].str.lower().str.contains(query, na=False)
+        )
+        filtered_df = df_players[mask]
+    else:
+        filtered_df = df_players
+
+    # 4. Apply styling to grey out IR players
+    def style_ir_players(row):
+        """Greys out the entire row if player status is IR."""
+        if str(row["Status"]).upper() == "IR":
+            return ["background-color: #3f444c; color: #a0a6b0;"] * len(row)
+        return [""] * len(row)
+
+    styled_df = filtered_df.style.apply(style_ir_players, axis=1)
+
+    # 5. Display rendered styled table
+    st.dataframe(styled_df, width="stretch", hide_index=True)
 # -----------------------------------------------------------------------------
 # TAB 5: Commissioner Administration
 # -----------------------------------------------------------------------------
