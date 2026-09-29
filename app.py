@@ -8,6 +8,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from supabase import Client, create_client
+import extra_streamlit_components as stx
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Supabase Initialization
@@ -64,8 +65,27 @@ if "team_name" not in st.session_state:
 # -----------------------------------------------------------------------------
 st.sidebar.title("🏎️ FF Kart League")
 
+# # Setup cookie manager
+# cookie_manager = stx.CookieManager()
+
+# # Check if auth token cookie exists
+# auth_token = cookie_manager.get(cookie="auth_token")
+
+# if auth_token == "valid_secret_token":
+#     st.write("Logged in from saved cookie!")
+# else:
+#     username = st.text_input("Username")
+#     password = st.text_input("Password", type="password")
+    
+#     if st.button("Log In"):
+#         if username == "admin" and password == "secret": # Replace with real auth validation
+#             # Save token in browser cookie for 7 days
+#             cookie_manager.set("auth_token", "valid_secret_token", key="set_auth", expires_at=7)
+#             st.rerun()
+
 if not st.session_state["authenticated"]:
     st.sidebar.subheader("Manager Login")
+
 
     try:
         rosters_res = supabase.table("rosters").select("*").execute()
@@ -212,6 +232,24 @@ with tab1:
             reverse=True,
         )
 
+        roster_summary = []
+        for r_id, team_name in roster_map.items():
+            team_data = next((t for t in leaderboard if t.get("roster_id") == r_id), None)
+            raw_score = team_data.get("raw_score", 0.0) if team_data else 0.0
+            mod_score = team_data.get("modified_score", 0.0) if team_data else 0.0
+            roster_summary.append({
+                "Roster ID": r_id,
+                "Team": team_name,
+                "Raw Score": round(raw_score, 2),
+                "Modified Score": round(mod_score, 2),
+            })
+
+        roster_summary = sorted(
+            roster_summary,
+            key=lambda row: (row["Modified Score"], row["Raw Score"]),
+            reverse=True,
+        )
+
         rank_icons = {1: "🥇", 2: "🥈", 3: "🥉"}
 
         for idx, team in enumerate(leaderboard, start=1):
@@ -248,6 +286,34 @@ with tab1:
                     with col_info:
                         st.subheader(t_name)
                         st.caption(f"Raw Sleeper Score: **{raw_score:.2f} pts**")
+
+                        roster_players = sleeper_api.get_roster_players(league_id, r_id) or []
+                        if roster_players:
+                            roster_df = pd.DataFrame([
+                                {
+                                    "Player": p.get("name", "Unknown"),
+                                    "Pos": p.get("pos", "N/A"),
+                                    "Team": p.get("team", "FA"),
+                                    "Starter": "Yes" if p.get("is_starter") else "No",
+                                }
+                                for p in roster_players
+                            ])
+                            position_order = ["QB", "RB", "WR", "TE", "K", "DEF", "FLEX", "BN"]
+                            roster_df["sort_pos"] = roster_df["Pos"].map(
+                                {pos: idx for idx, pos in enumerate(position_order)}
+                            ).fillna(len(position_order))
+                            roster_df = roster_df.sort_values(
+                                by=["Starter", "sort_pos", "Player"],
+                                ascending=[False, True, True],
+                            )
+                            roster_df = roster_df.drop(columns=["sort_pos"])
+                            with st.expander("View roster"):
+                                st.dataframe(
+                                    roster_df,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+
                         if effects:
                             st.write("**Active Chaos Effects:**")
                             for eff in effects:
@@ -348,115 +414,114 @@ with tab2:
 with tab3:
     st.header("🎒 Item Inventory & Action Portal")
 
-# Roll weekly items or check for existing
-if current_weekday >= 1:  # Tuesday (1) through Sunday (6)
-    # 1. Fetch current standings/ranks map {roster_id: rank}
-    standings_ranks = {
-        team["roster_id"]: rank 
-        for rank, team in enumerate(leaderboard, start=1)
-    }
-    
-    # 2. Automatically check and roll drops if not already generated
-    success, message = item_engine.generate_weekly_drops(
-        supabase=supabase, 
-        week=selected_week, 
-        standings_ranks=standings_ranks
-    )
+    # Roll weekly items or check for existing
+    if current_weekday >= 1:  # Tuesday (1) through Sunday (6)
+        # 1. Fetch current standings/ranks map {roster_id: rank}
+        standings_ranks = {
+            team["roster_id"]: rank 
+            for rank, team in enumerate(leaderboard, start=1)
+        }
 
-
-    # Check for Active League Event
-    try:
-        event_res = supabase.table("league_events").select("*").eq("week", selected_week).execute()
-        active_event = event_res.data[0] if event_res.data else None
-    except Exception:
-        active_event = None
-
-    if active_event:
-        st.info(
-            f"📢 **Week {selected_week} Global Event: {active_event['event_name']}**\n\n"
-            f"{active_event['description']}\n\n"
-            "*Individual item drops are replaced by this league-wide event for the week.*"
+        # 2. Automatically check and roll drops if not already generated
+        success, message = item_engine.generate_weekly_drops(
+            supabase=supabase,
+            week=selected_week,
+            standings_ranks=standings_ranks,
         )
-    elif not st.session_state["authenticated"]:
-        st.warning("🔒 Please log in via the sidebar to view your rolled item and make selections.")
-    else:
-        user_roster_id = st.session_state["roster_id"]
 
-        # Fetch Manager's Rolled Item for the Week
+        # Check for Active League Event
         try:
-            inv_res = (
-                supabase.table("team_inventory")
-                .select("id, item_id, is_used, items(name, description, target_type)")
-                .eq("roster_id", user_roster_id)
-                .eq("week", selected_week)
-                .execute()
-            )
-            inventory = inv_res.data or []
+            event_res = supabase.table("league_events").select("*").eq("week", selected_week).execute()
+            active_event = event_res.data[0] if event_res.data else None
         except Exception:
-            inventory = []
+            active_event = None
 
-        if not inventory:
-            st.info("🕒 Item drops reveal Tuesday morning. Check back soon!")
+        if active_event:
+            st.info(
+                f"📢 **Week {selected_week} Global Event: {active_event['event_name']}**\n\n"
+                f"{active_event['description']}\n\n"
+                "*Individual item drops are replaced by this league-wide event for the week.*"
+            )
+        elif not st.session_state["authenticated"]:
+            st.warning("🔒 Please log in via the sidebar to view your rolled item and make selections.")
         else:
-            item_record = inventory[0]
-            item_info = item_record.get("items") or {}
-            target_type = item_info.get("target_type")
-            is_used = item_record.get("is_used", False)
+            user_roster_id = st.session_state["roster_id"]
 
-            st.success(f"### Your Week {selected_week} Item: **{item_info.get('name')}**")
-            st.write(item_info.get("description"))
+            # Fetch Manager's Rolled Item for the Week
+            try:
+                inv_res = (
+                    supabase.table("team_inventory")
+                    .select("id, item_id, is_used, items(name, description, target_type)")
+                    .eq("roster_id", user_roster_id)
+                    .eq("week", selected_week)
+                    .execute()
+                )
+                inventory = inv_res.data or []
+            except Exception:
+                inventory = []
 
-            if is_used:
-                st.info("✅ You have submitted your item selection for this week!")
+            if not inventory:
+                st.info("🕒 Item drops reveal Tuesday morning. Check back soon!")
             else:
-                st.subheader("Submit Your Selection (Deadline: Thursday Midnight)")
+                item_record = inventory[0]
+                item_info = item_record.get("items") or {}
+                target_type = item_info.get("target_type")
+                is_used = item_record.get("is_used", False)
 
-                with st.form("play_item_form"):
-                    target_player_id = None
-                    target_team = None
-                    custom_text = None
+                st.success(f"### Your Week {selected_week} Item: **{item_info.get('name')}**")
+                st.write(item_info.get("description"))
 
-                    if target_type == "ROSTER_PLAYER":
-                        # Fetch player's active roster from Sleeper
-                        roster_players = sleeper_api.get_roster_players(user_roster_id)
-                        player_opts = {
-                            f"{p['name']} ({p['pos']} - {p['team']})": p["id"]
-                            for p in roster_players
-                        }
-                        sel_player = st.selectbox("Select Roster Player", list(player_opts.keys()))
-                        target_player_id = player_opts.get(sel_player)
+                if is_used:
+                    st.info("✅ You have submitted your item selection for this week!")
+                else:
+                    st.subheader("Submit Your Selection (Deadline: Thursday Midnight)")
 
-                    elif target_type == "OPPONENT":
-                        opponents = {
-                            name: r_id for r_id, name in roster_map.items() if r_id != user_roster_id
-                        }
-                        target_team = st.selectbox("Select Target Manager", list(opponents.keys()))
+                    with st.form("play_item_form"):
+                        target_player_id = None
+                        target_team = None
+                        custom_text = None
 
-                    elif target_type == "NFL_TEAM":
-                        all_teams = sorted(list(set(p["team"] for p in players_data.values() if p.get("team"))))
-                        target_team = st.selectbox("Select NFL Team", all_teams)
+                        if target_type == "ROSTER_PLAYER":
+                            # Fetch player's active roster from Sleeper
+                            roster_players = sleeper_api.get_roster_players(league_id, user_roster_id)
+                            player_opts = {
+                                f"{p['name']} ({p['pos']} - {p['team']})": p["id"]
+                                for p in roster_players
+                            }
+                            sel_player = st.selectbox("Select Roster Player", list(player_opts.keys()))
+                            target_player_id = player_opts.get(sel_player)
 
-                    elif target_type == "FREE_TEXT":
-                        custom_text = st.text_input("Enter Player/Target Name (e.g. LeBron James / Player Name)")
+                        elif target_type == "OPPONENT":
+                            opponents = {
+                                name: r_id for r_id, name in roster_map.items() if r_id != user_roster_id
+                            }
+                            target_team = st.selectbox("Select Target Manager", list(opponents.keys()))
 
-                    submitted = st.form_submit_button("🚀 Lock In Item Selection")
-                    
-                    if submitted:
-                        supabase.table("weekly_plays").insert({
-                            "week": selected_week,
-                            "roster_id": user_roster_id,
-                            "item_id": item_record.get("item_id"),
-                            "target_player_id": target_player_id,
-                            "target_nfl_team": target_team,
-                            "custom_target": custom_text
-                        }).execute()
+                        elif target_type == "NFL_TEAM":
+                            all_teams = sorted(list(set(p["team"] for p in players_data.values() if p.get("team"))))
+                            target_team = st.selectbox("Select NFL Team", all_teams)
 
-                        supabase.table("team_inventory").update({"is_used": True}).eq(
-                            "id", item_record.get("id")
-                        ).execute()
+                        elif target_type == "FREE_TEXT":
+                            custom_text = st.text_input("Enter Player/Target Name (e.g. LeBron James / Player Name)")
 
-                        st.success("🎉 Selection saved successfully!")
-                        st.rerun()
+                        submitted = st.form_submit_button("🚀 Lock In Item Selection")
+
+                        if submitted:
+                            supabase.table("weekly_plays").insert({
+                                "week": selected_week,
+                                "roster_id": user_roster_id,
+                                "item_id": item_record.get("item_id"),
+                                "target_player_id": target_player_id,
+                                "target_nfl_team": target_team,
+                                "custom_target": custom_text,
+                            }).execute()
+
+                            supabase.table("team_inventory").update({"is_used": True}).eq(
+                                "id", item_record.get("id")
+                            ).execute()
+
+                            st.success("🎉 Selection saved successfully!")
+                            st.rerun()
 
 # -----------------------------------------------------------------------------
 # TAB 4: NFL Player Database with Event Indicators
@@ -466,72 +531,106 @@ with tab4:
 
     pruned_file_path = "pruned_players.json"
 
-if not os.path.exists(pruned_file_path):
-    st.error(f"⚠️ `{pruned_file_path}` not found in root directory.")
-else:
-    with open(pruned_file_path, "r", encoding="utf-8") as f:
-        pruned_players = json.load(f)
-
-    # 2. Format player data into tabular format
-    formatted_players = []
-    for p_id, info in pruned_players.items():
-        if isinstance(info, dict):
-            full_name = (
-                info.get("full_name")
-                or f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
-                or f"Player {p_id}"
-            )
-            
-            years_exp = info.get("years_exp")
-            is_rookie = "Yes" if years_exp == 0 or years_exp == "0" else "No"
-            
-            formatted_players.append({
-                "Name": full_name,
-                "Position": info.get("position") or "N/A",
-                "Team": info.get("team") or "FA",
-                "Rookie": is_rookie,
-                "Depth Chart Order": info.get("depth_chart_order", "N/A"),
-                "Injury Status": info.get("injury_status") or "Active",
-                "Status": info.get("status") or "Active",
-            })
-
-    df_players = pd.DataFrame(formatted_players)
-
-    # Clean depth chart order column for proper sorting
-    if "Depth Chart Order" in df_players.columns:
-        df_players["Depth Chart Order"] = pd.to_numeric(
-            df_players["Depth Chart Order"], errors="coerce"
-        ).astype("Int64")
-        df_players = df_players.sort_values(
-            by=["Team", "Depth Chart Order", "Name"],
-            na_position="last"
-        )
-
-    # 3. Add Search Bar
-    search_query = st.text_input("🔍 Search players by name, team, or position:", "")
-    
-    if search_query:
-        query = search_query.strip().lower()
-        mask = (
-            df_players["Name"].str.lower().str.contains(query, na=False) |
-            df_players["Team"].str.lower().str.contains(query, na=False) |
-            df_players["Position"].str.lower().str.contains(query, na=False)
-        )
-        filtered_df = df_players[mask]
+    if not os.path.exists(pruned_file_path):
+        st.error(f"⚠️ `{pruned_file_path}` not found in root directory.")
     else:
-        filtered_df = df_players
+        with open(pruned_file_path, "r", encoding="utf-8") as f:
+            pruned_players = json.load(f)
 
-    # 4. Apply styling to grey out IR players
-    def style_ir_players(row):
-        """Greys out the entire row if player status is IR."""
-        if str(row["Status"]).upper() == "IR":
-            return ["background-color: #3f444c; color: #a0a6b0;"] * len(row)
-        return [""] * len(row)
+        # 2. Format player data into tabular format
+        formatted_players = []
+        for p_id, info in pruned_players.items():
+            if isinstance(info, dict):
+                full_name = (
+                    info.get("full_name")
+                    or f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
+                    or f"Player {p_id}"
+                )
 
-    styled_df = filtered_df.style.apply(style_ir_players, axis=1)
+                years_exp = info.get("years_exp")
+                is_rookie = "Yes" if years_exp == 0 or years_exp == "0" else "No"
 
-    # 5. Display rendered styled table
-    st.dataframe(styled_df, width="stretch", hide_index=True)
+                formatted_players.append({
+                    "Name": full_name,
+                    "Position": info.get("position") or "N/A",
+                    "Team": info.get("team") or "FA",
+                    "Rookie": is_rookie,
+                    "Depth Chart Order": info.get("depth_chart_order", "N/A"),
+                    "Injury Status": info.get("injury_status") or "Active",
+                    "Status": info.get("status") or "Active",
+                })
+
+        df_players = pd.DataFrame(formatted_players)
+
+        # Clean depth chart order column for proper sorting
+        if "Depth Chart Order" in df_players.columns:
+            df_players["Depth Chart Order"] = pd.to_numeric(
+                df_players["Depth Chart Order"], errors="coerce"
+            ).astype("Int64")
+            df_players = df_players.sort_values(
+                by=["Team", "Depth Chart Order", "Name"],
+                na_position="last",
+            )
+
+            # 3. Expandable Filter Section with Dropdowns
+            with st.expander("🔎 Filter Players", expanded=True):
+                col1, col2 = st.columns(2)
+                col3, col4, col5 = st.columns(3)
+
+                with col1:
+                    name_search = st.text_input("Search Name")
+
+                with col2:
+                    # Get unique teams sorted, excluding empty ones
+                    team_options = sorted([t for t in df_players["Team"].unique() if t])
+                    selected_teams = st.multiselect("Team", options=team_options)
+
+                with col3:
+                    pos_options = sorted([p for p in df_players["Position"].unique() if p])
+                    selected_positions = st.multiselect("Position", options=pos_options)
+
+                with col4:
+                    rookie_options = sorted([r for r in df_players["Rookie"].unique() if r])
+                    selected_rookie = st.multiselect("Rookie", options=rookie_options)
+
+                with col5:
+                    status_options = sorted([s for s in df_players["Status"].unique() if s])
+                    selected_status = st.multiselect("Status", options=status_options)
+
+            filtered_df = df_players.copy()
+
+            if name_search:
+                filtered_df = filtered_df[filtered_df["Name"].str.contains(name_search, case=False, na=False)]
+
+            if selected_teams:
+                filtered_df = filtered_df[filtered_df["Team"].isin(selected_teams)]
+
+            if selected_positions:
+                filtered_df = filtered_df[filtered_df["Position"].isin(selected_positions)]
+
+            if selected_rookie:
+                filtered_df = filtered_df[filtered_df["Rookie"].isin(selected_rookie)]
+
+            if selected_status:
+                filtered_df = filtered_df[filtered_df["Status"].isin(selected_status)]
+
+            # 4. Apply styling to grey out inactive/injured players by severity
+            def style_ir_players(row):
+                """Greys out rows by injury severity: IR/inactive highest, then Out/Doubtful/Questionable."""
+                status = str(row.get("Status", "")).upper()
+                injury_status = str(row.get("Injury Status", "")).upper()
+
+                if status in {"IR", "INACTIVE"} or injury_status == "IR":
+                    return ["background-color: #3f444c; color: #a0a6b0;"] * len(row)
+                if status in {"OUT", "DOUBTFUL", "QUESTIONABLE"} or injury_status in {"OUT", "DOUBTFUL", "QUESTIONABLE"}:
+                    return ["background-color: #5b4d42; color: #d9c8b2;"] * len(row)
+                return [""] * len(row)
+
+            styled_df = filtered_df.style.apply(style_ir_players, axis=1)
+
+            # 5. Display rendered styled table
+            st.dataframe(styled_df, width="stretch", hide_index=True)
+
 # -----------------------------------------------------------------------------
 # TAB 5: Commissioner Administration
 # -----------------------------------------------------------------------------
