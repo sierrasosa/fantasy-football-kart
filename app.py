@@ -8,7 +8,6 @@ import os
 import json
 from datetime import datetime, timedelta
 from supabase import Client, create_client
-import extra_streamlit_components as stx
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Supabase Initialization
