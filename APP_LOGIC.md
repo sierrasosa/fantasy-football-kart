@@ -10,11 +10,7 @@ At the top of [app.py](app.py), the app initializes the Streamlit page and conne
 - It defines `init_supabase()` and creates a cached Supabase client using secrets from `st.secrets`.
 - It includes a helper, `hash_pin()`, which hashes the manager PIN using SHA-256 before comparing it to a stored value.
 
-This makes the app ready to:
-- authenticate managers,
-- read roster data,
-- fetch weekly items and results,
-- update data in Supabase.
+The app uses the Supabase service-role key from Streamlit secrets on the Python server. RLS is enabled and anon has no direct table access; service-role operations bypass RLS and must remain behind the app's checks.
 
 ## 2. Session state and login flow
 
@@ -23,15 +19,21 @@ The app uses Streamlit session state to track:
 - `authenticated`
 - `roster_id`
 - `team_name`
+- `user_id`
+- `active_league_id`
 
 If these values are not present, it initializes them to `False` and `None`.
 
-The sidebar is the login area:
+The sidebar is the login and league setup area:
 
-- It loads all rosters from Supabase.
-- It presents a team selector and PIN field.
-- If the entered PIN matches the stored hash, the user is authenticated and their roster ID and team name are saved in session state.
-- If the PIN is wrong, an error is shown.
+- The manager enters a Sleeper username. The app resolves it to a Sleeper `user_id` and checks for initialized roster records.
+- Existing managers choose a league/team and enter the PIN stored for that roster.
+- If no app roster exists, eligible leagues are listed for the selected Sleeper season. The season selector defaults to the current NFL season and includes prior seasons back to 2022. Only Sleeper commissioners can initialize a league, except `sierrabellum`, who is explicitly allowed.
+- Initialization also requires `LEAGUE_SETUP_CODE` from Streamlit secrets. A server-side service-role client imports the league's rosters and generates unique manager PINs; only salted PIN hashes are stored.
+- The generated PINs are shown once to the initializing commissioner for out-of-band sharing. The app does not verify control of Sleeper usernames.
+- Five incorrect PINs for a Sleeper user trigger a 15-minute lockout tracked in the server-only `login_attempts` table.
+- Managers can select “Remember this browser for 30 days.” The browser stores a random cookie token; Supabase stores only its hash, user ID, selected league, and expiry. Logging out revokes the server-side token and removes the cookie.
+- An authenticated manager can choose among their initialized leagues in the sidebar. Logging out clears the active session.
 
 When logged in, the sidebar shows the current team name and includes a logout button that clears the session state and reruns the app.
 
@@ -42,7 +44,7 @@ The app exposes a sidebar widget for picking the NFL week:
 - `selected_week = st.sidebar.number_input(...)`
 - It is limited to 1 through 18.
 
-The league ID is also loaded from `st.secrets["SLEEPER_LEAGUE_ID"]`.
+The active league ID comes from the authenticated manager's selected roster, not a single fixed secret.
 
 This means the rest of the app calculates data for whatever week the user selects.
 
@@ -71,7 +73,7 @@ This returns raw Sleeper matchup data for the selected week.
 
 It queries Supabase for `weekly_plays` rows matching the current week.
 
-This data tells the app which players/items were used by each roster and what they targeted.
+This data tells the app which players/items were used by each roster and what they targeted. Queries and writes for rosters, weekly plays, inventory, and events include the active `league_id` so separate leagues remain isolated.
 
 ## 5. Scoring modifier flow
 
@@ -206,9 +208,14 @@ This tab is a placeholder UI for future commissioner functionality. It currently
 The app combines a few layers:
 
 - Streamlit UI layer: all visible tabs and forms
-- Sleeper API layer: league and player data
-- Supabase layer: persistent roster, inventory, weekly plays, and event data
+- `auth_service.py`: PIN hashing/verification and persistent login rate limiting
+- `league_service.py`: roster lookup, commissioner league discovery, and league initialization persistence
+- `item_service.py`: league-scoped event checks and weekly item-drop persistence
+- `sleeper_api.py`: Sleeper account, league, roster, and player data
+- Supabase service client: persistent roster, inventory, weekly plays, and event data
 - custom scoring logic: modifying raw fantasy points using item effects
+
+`app.py` owns Streamlit widgets and session-state transitions. Service modules own reusable authentication and data operations so they can be tested independently of the rendered UI. `item_engine.py` remains as a compatibility import for weekly drop generation.
 
 The app behaves like a dashboard and game engine for a fantasy football / Mario Kart-themed custom league system.
 

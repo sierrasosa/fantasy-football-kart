@@ -8,8 +8,8 @@ A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leag
 
 * **Sleeper API Integration:** Pulls real-time rosters, matchings, and live scores.
 * **Chaos Item System:** Play game-changing items like freezing opponent players, boosting team points, or starting bench players.
-* **Manager Authentication:** PIN-protected access so league members can securely view inventory and submit item plays.
-* **Supabase Backend:** Relational storage for rosters, item definitions, team inventories, and weekly submissions.
+* **Manager Authentication:** Sleeper username lookup and per-manager PINs, with an optional 30-day remembered browser session.
+* **Supabase Backend:** League-scoped rosters, item inventories, events, and weekly submissions.
 
 ---
 
@@ -18,21 +18,20 @@ A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leag
 * [x] **Step 1: Environment & Dependencies**
   * Configured Python virtual environment (`ffenv`).
 * [x] **Step 2: Database Setup & RLS (Supabase)**
-  * Created core tables (`rosters`, `items`, `team_inventory`, `weekly_plays`).
-  * Configured RLS policies: `service_role` handles admin writes while `anon` remains securely read-only for app clients.
+  * Schema supports independent leagues with composite league-scoped keys.
+  * RLS is enabled; the app uses the server-only service-role key and anon has no table access.
 * [x] **Step 3: Core Logic & Secrets**
   * Implemented Sleeper API client (`sleeper_api.py`) and scoring engine (`scoring.py`).
   * Configured `.streamlit/secrets.toml` with `SUPABASE_URL`, `SUPABASE_KEY`, `SUPABASE_SERVICE_KEY`, and `SLEEPER_LEAGUE_ID`.
 * [x] **Step 4: Seed Real League Data**
-  * Executed `seed_rosters.py` using `SUPABASE_SERVICE_KEY` to pull Sleeper managers and assign default PINs (`1234`).
+  * Commissioners initialize eligible leagues with a setup code; each manager receives a unique generated PIN.
 * [x] **Step 5: Local Verification**
   * Verified local Streamlit app execution and team login authentication.
 * [ ] **Step 6: Hosting & Deployment**
   * Commit and push local repository to GitHub.
   * Connect repository to Streamlit Community Cloud and set production secrets.
-* [ ] **Step 7: Multi-Tenant Expansion (Future)**
-  * Add multi-league support and commissioner setup portal.
-  * Dynamic league routing via URL parameters (`?league=...`).
+* [x] **Step 7: Multi-League Support**
+  * Managers select an active initialized league in the sidebar.
 
 ---
 
@@ -41,87 +40,36 @@ A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leag
 ### 1. Prerequisites
 * Python 3.10+
 * A [Supabase](https://supabase.com/) project
-* A [Sleeper](https://sleeper.app/) Fantasy League ID
+* A [Sleeper](https://sleeper.app/) account
 
 ### 2. Environment Configuration
-Create a `.streamlit/secrets.toml` file in your root directory:
+For local development, create `.streamlit/secrets.toml`. On Streamlit Community Cloud, add these values under **App settings → Secrets** instead:
 
 ```toml
-SUPABASE_URL = "[https://your-project-ref.supabase.co](https://your-project-ref.supabase.co)"
-SUPABASE_KEY = "your-anon-public-key"
+SUPABASE_URL = "https://your-project-ref.supabase.co"
+SUPABASE_SERVICE_KEY = "your-supabase-service-role-key"
+LEAGUE_SETUP_CODE = "a-long-random-secret-value"
+# Optional: used by the manual seed_rosters.py command.
 SLEEPER_LEAGUE_ID = "your-sleeper-league-id"
-
 ```
+
+The Streamlit server uses `SUPABASE_SERVICE_KEY` from Python only. Never print it, commit it, or send it to browser JavaScript. The service-role key bypasses RLS, so keep database writes behind app-side checks. Rotate it immediately if it is exposed.
+
+League initialization requires the Sleeper account to be a commissioner, except for the `sierrabellum` account, and also requires the shared setup code. Sleeper username lookup does not prove account ownership; distribute the setup code only to trusted commissioners. Login blocks an account for 15 minutes after five incorrect PINs.
 
 ### 3. Database Initial Setup
 
-Run the following SQL in your Supabase **SQL Editor** to create the schema and permissions:
+For a new database, run [supabase_schema.sql](supabase_schema.sql) in the Supabase SQL Editor. For the existing single-league database, first replace `REPLACE_WITH_EXISTING_LEAGUE_ID` in [supabase_migrate_multileague.sql](supabase_migrate_multileague.sql) with the current league ID, then run that migration once. If the database was already rebuilt or migrated before remember-browser support was added, run [supabase_login_sessions.sql](supabase_login_sessions.sql). Back up the database before migrations.
 
-```sql
--- Create Tables
-CREATE TABLE IF NOT EXISTS rosters (
-    roster_id INT PRIMARY KEY,
-    owner_name TEXT NOT NULL,
-    team_name TEXT NOT NULL,
-    pin_hash TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS items (
-    item_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    target_type TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS team_inventory (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    roster_id INT REFERENCES rosters(roster_id),
-    item_id TEXT REFERENCES items(item_id),
-    is_used BOOLEAN DEFAULT FALSE,
-    acquired_week INT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS weekly_plays (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    week INT NOT NULL,
-    roster_id INT REFERENCES rosters(roster_id),
-    item_id TEXT REFERENCES items(item_id),
-    target_player_id TEXT,
-    target_nfl_team TEXT,
-    played_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(week, roster_id, item_id)
-);
-
--- Seed Default Items
-INSERT INTO items (item_id, name, description, target_type) VALUES
-('FREEZE_PLAYER', 'Ice Ice Baby', 'Select an opponent player. They score 0 points.', 'PLAYER'),
-('DOUBLE_TEAM', 'Team Hype', 'Select an NFL team. Double points for all starters on that team.', 'TEAM'),
-('PLAY_BENCH', 'Sixth Man', 'Add all points scored by your bench to your total.', 'SELF')
-ON CONFLICT (item_id) DO NOTHING;
-
--- Security & Permissions
-GRANT SELECT ON public.rosters TO anon;
-GRANT SELECT ON public.items TO anon;
-GRANT ALL ON public.team_inventory TO anon;
-GRANT ALL ON public.weekly_plays TO anon;
-GRANT ALL ON public.rosters TO service_role;
-
-ALTER TABLE rosters ENABLE ROW LEVEL SECURITY;
-ALTER TABLE items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE team_inventory ENABLE ROW LEVEL SECURITY;
-ALTER TABLE weekly_plays ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow anon read rosters" ON rosters FOR SELECT USING (true);
-CREATE POLICY "Allow anon read items" ON items FOR SELECT USING (true);
-CREATE POLICY "Allow anon all team_inventory" ON team_inventory FOR ALL USING (true);
-CREATE POLICY "Allow anon all weekly_plays" ON weekly_plays FOR ALL USING (true);
-
-```
+Remember-browser login stores a random bearer token in a secure, SameSite cookie and stores only its SHA-256 hash in Supabase. The cookie lasts 30 days and is revoked on logout. The Streamlit cookie component cannot mark the cookie HttpOnly, so the token is opaque but still accessible to JavaScript running on the app origin; avoid unsafe HTML and third-party scripts.
 
 ### 4. Seed Rosters & Run App
 
 ```bash
-# Populate rosters from Sleeper API
+# Optional: import item and event templates from item_rules.xlsx
+python seed_items.py
+
+# Optional manual roster initialization; the app also supports setup-code initialization
 python seed_rosters.py
 
 # Launch Streamlit app locally
@@ -136,5 +84,5 @@ streamlit run app.py
 1. Log into [share.streamlit.io](https://share.streamlit.io/).
 2. Select **New app** $\rightarrow$ choose your repository and branch (`main`).
 3. Set **Main file path** to `app.py`.
-4. Under **Advanced settings...** $\rightarrow$ **Secrets**, paste your `.streamlit/secrets.toml` content (excluding `SUPABASE_SERVICE_KEY` if not needed in production).
+4. Under **Advanced settings...** $\rightarrow$ **Secrets**, add `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, and `LEAGUE_SETUP_CODE`.
 5. Click **Deploy!**

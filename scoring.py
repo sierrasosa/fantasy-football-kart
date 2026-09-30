@@ -1,3 +1,19 @@
+GP_POINTS_MAP = {
+    1: 15,
+    2: 12,
+    3: 10,
+    4: 9,
+    5: 8,
+    6: 7,
+    7: 6,
+    8: 5,
+    9: 4,
+    10: 3,
+    11: 2,
+    12: 1,
+}
+
+
 def calculate_modified_scores(matchups, weekly_plays, players_data):
     """
     Applies played chaos items to raw Sleeper matchup scores.
