@@ -1,8 +1,35 @@
 import hmac
+import random
 import requests
 from helpers import sleeper_api
 import streamlit as st
 from database.auth_service import generate_pin, hash_pin
+
+
+def select_weekly_events(template_events: list[dict]) -> list[dict]:
+    """Roll at most one event per week using the template occurrence odds."""
+    events_by_week = {}
+    for event in template_events:
+        events_by_week.setdefault(event.get("week"), []).append(event)
+
+    selected_events = []
+    for week in sorted(events_by_week):
+        weekly_events = events_by_week[week]
+        chances = [float(event.get("chance") or 0) for event in weekly_events]
+        total_chance = sum(chances)
+        if total_chance > 1.000001:
+            raise ValueError(f"Event odds exceed 100% for week {week}.")
+
+        no_event_chance = max(0.0, 1.0 - total_chance)
+        selected_event = random.choices(
+            weekly_events + [None],
+            weights=chances + [no_event_chance],
+            k=1,
+        )[0]
+        if selected_event is not None:
+            selected_events.append(selected_event)
+
+    return selected_events
 
 
 def get_user_rosters(supabase_client, user_id: str, include_pin_hash: bool = False) -> list[dict]:
@@ -205,8 +232,9 @@ def sync_sleeper_rosters(
         or []
     )
     if template_events and not existing_events:
+        selected_events = select_weekly_events(template_events)
         supabase_client.table("league_events").insert([
-            {**event, "league_id": league_id} for event in template_events
+            {**event, "league_id": league_id} for event in selected_events
         ]).execute()
 
     return manager_pins

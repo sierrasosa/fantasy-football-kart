@@ -165,6 +165,8 @@ The code checks the current weekday and then determines whether to generate week
 - it looks up the item details (name, description, target type)
 - it decides how the item should be played based on the item’s target type
 
+League-wide event rows in the `League-wide` item-rules sheet are occurrence odds, not simultaneous events. When a league is initialized, the app rolls at most one event per week using those odds and stores the selected event; unused probability means no event that week. The database enforces one league event per week, and `supabase_migrate_single_event_per_week.sql` resolves any existing duplicate event rows.
+
 ### Supported target types
 
 The app supports different kinds of item targeting:

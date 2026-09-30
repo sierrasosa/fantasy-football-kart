@@ -1,5 +1,6 @@
 from helpers import sleeper_api
 from game_logic import scoring, item_service
+from game_logic.timing_logic import get_current_nfl_context
 import streamlit as st
 import extra_streamlit_components as stx
 import pandas as pd
@@ -439,6 +440,48 @@ try:
 except Exception:
     weekly_plays = []
 
+try:
+    inventory_res = (
+        supabase.table("team_inventory")
+        .select("roster_id, item_id, is_used, items(name)")
+        .eq("league_id", league_id)
+        .eq("week", selected_week)
+        .execute()
+    )
+    weekly_inventory = inventory_res.data or []
+except Exception:
+    weekly_inventory = []
+
+try:
+    events_res = (
+        supabase.table("league_events")
+        .select("event_name, description")
+        .eq("league_id", league_id)
+        .eq("week", selected_week)
+        .execute()
+    )
+    weekly_events = events_res.data or []
+except Exception:
+    weekly_events = []
+
+try:
+    items_res = supabase.table("items").select("id, name").execute()
+    item_names = {
+        str(item.get("id")): item.get("name")
+        for item in (items_res.data or [])
+    }
+except Exception:
+    item_names = {}
+
+plays_by_roster = {}
+for play in weekly_plays:
+    plays_by_roster.setdefault(str(play.get("roster_id")), []).append(play)
+
+inventory_by_roster = {
+    str(item.get("roster_id")): item
+    for item in weekly_inventory
+}
+
 calculated_matchups = scoring.calculate_modified_scores(
     raw_matchups, weekly_plays, players_data
 ) or []
@@ -482,9 +525,24 @@ except Exception as e:
 # 5. Main UI Tabs
 # -----------------------------------------------------------------------------
 st.title("🏎️ Fantasy Football Kart")
+for weekly_event in weekly_events:
+    st.info(
+        f"📢 **Week {selected_week} Global Event: "
+        f"{weekly_event.get('event_name', 'League Event')}**\n\n"
+        f"{weekly_event.get('description', '')}"
+    )
 
-now = datetime.now()
-current_weekday = now.weekday()
+nfl_context = get_current_nfl_context()
+now = nfl_context["now"]
+current_weekday = nfl_context["weekday"]
+current_nfl_week = nfl_context["week"]
+show_weekly_item_details = (
+    selected_week < current_nfl_week
+    or (
+        selected_week == current_nfl_week
+        and current_weekday in {0, 4, 5, 6}
+    )
+)
 
 if current_weekday == 1:  # Tuesday
     st.header("ITEM DROP TODAY! Go to the item tab and make your selection!")
@@ -562,53 +620,234 @@ with tab1:
             icon = rank_icons.get(idx, "")
 
             with st.container(border=True):
-                col_rank, col_avatar, col_details = st.columns([1, 1, 4])
+                st.markdown(
+                    f"<div style='display:flex; align-items:center; gap:0.65rem; "
+                    f"flex-wrap:wrap; margin-bottom:0.6rem;'>"
+                    f"<span style='font-size:1.15rem; font-weight:700;'>"
+                    f"{icon} #{idx}</span>"
+                    f"<span style='color:#ff4b4b; font-weight:700;'>"
+                    f"+{gp_pts} GP Pts</span></div>",
+                    unsafe_allow_html=True,
+                )
 
-                with col_rank:
-                    st.markdown(
-                        f"<h2 style='text-align: center; margin: 0;'>{icon} #{idx}</h2>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"<p style='text-align: center; font-weight: bold; color: #ff4b4b; margin: 0;'>+{gp_pts} GP Pts</p>",
-                        unsafe_allow_html=True,
-                    )
-
+                col_avatar, col_info = st.columns([0.65, 5], vertical_alignment="center")
                 with col_avatar:
-                    st.image(t_avatar, width="stretch")
+                    st.image(t_avatar, width=48)
 
-                with col_details:
-                    col_info, col_metric = st.columns([2, 1])
+                with col_info:
+                    st.subheader(t_name)
+                    st.caption(f"Raw {raw_score:.2f} pts")
 
-                    with col_info:
-                        st.subheader(t_name)
-                        st.caption(f"Raw Sleeper Score: **{raw_score:.2f} pts**")
+                modified_score_line = f"**Modified: {mod_score:.2f} pts**"
+                if delta_score != 0:
+                    modified_score_line += f" · {delta_score:+.2f} vs raw"
+                st.markdown(modified_score_line)
 
-                        roster_players = sleeper_api.get_roster_players(
-                            league_id,
-                            r_id,
-                            matchup_data=matchup_data_by_roster.get(str(r_id)),
-                        ) or []
-                        if roster_players:
-                            roster_df = make_roster_dataframe(roster_players)
-                            with st.expander("View roster"):
-                                st.dataframe(
-                                    roster_df,
-                                    use_container_width=True,
-                                    hide_index=True,
+                roster_plays = plays_by_roster.get(str(r_id), [])
+                roster_players = sleeper_api.get_roster_players(
+                    league_id,
+                    r_id,
+                    matchup_data=matchup_data_by_roster.get(str(r_id)),
+                ) or []
+                roster_item = inventory_by_roster.get(str(r_id))
+                item_info = (roster_item or {}).get("items") or {}
+
+                roster_col, manager_item_col = st.columns([3.4, 1.6], gap="medium")
+                with roster_col:
+                    if effects:
+                        st.write("**Active Chaos Effects:**")
+                        for eff in effects:
+                            st.markdown(f"- {eff}")
+
+                    if roster_players:
+                        st.dataframe(
+                            make_roster_dataframe(roster_players),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                with manager_item_col:
+                    st.image(PROJECT_ROOT / "assets" / "item_box.png", width=48)
+                    if show_weekly_item_details and roster_plays:
+                        item_id = str(roster_plays[0].get("item_id") or "")
+                        item_name = (
+                            item_info.get("name")
+                            or item_names.get(item_id)
+                            or item_id.replace("_", " ").title()
+                            or "Item"
+                        )
+                        st.write(f"**{item_name}**")
+                        for play in roster_plays:
+                            target_player_id = str(play.get("target_player_id") or "")
+                            if target_player_id:
+                                player_info = players_data.get(target_player_id, {})
+                                choice = (
+                                    player_info.get("full_name")
+                                    or f"{player_info.get('first_name', '')} {player_info.get('last_name', '')}".strip()
+                                    or f"Player {target_player_id}"
+                                )
+                            else:
+                                choice = (
+                                    play.get("target_nfl_team")
+                                    or play.get("custom_target")
                                 )
 
-                        if effects:
-                            st.write("**Active Chaos Effects:**")
-                            for eff in effects:
-                                st.markdown(f"- {eff}")
+                            if choice:
+                                st.caption(f"Choice: {choice}")
+                    elif show_weekly_item_details:
+                        item_name = item_info.get("name")
+                        st.write(f"**{item_name or 'No item assigned'}**")
+                        if item_name:
+                            st.caption("No item selection recorded.")
+                    else:
+                        st.write("**Manager Item**")
+                        if (
+                            selected_week == current_nfl_week
+                            and current_weekday in {1, 2, 3}
+                        ):
+                            st.caption("Item details reveal after Thursday.")
+                        else:
+                            st.caption("Item appears when this week begins.")
 
-                    with col_metric:
-                        st.metric(
-                            label="Modified Score",
-                            value=f"{mod_score:.2f} pts",
-                            delta=f"{delta_score:+.2f} pts" if delta_score != 0 else None,
-                        )
+with st.sidebar:
+    st.divider()
+    st.subheader(f"🎒 Your Week {selected_week} Item")
+
+    if selected_week == 1:
+        st.info("Items are unavailable in Week 1.")
+    elif current_weekday < 1:
+        st.info("Item drops reveal Tuesday morning. Check back soon!")
+    else:
+        sidebar_leaderboard = sorted(
+            calculated_matchups,
+            key=lambda team: (
+                team.get("modified_score", 0.0),
+                team.get("raw_score", 0.0),
+            ),
+            reverse=True,
+        )
+        sidebar_standings_ranks = {
+            team["roster_id"]: rank
+            for rank, team in enumerate(sidebar_leaderboard, start=1)
+            if team.get("roster_id") is not None
+        }
+        item_service.generate_weekly_drops(
+            supabase=supabase,
+            league_id=league_id,
+            week=selected_week,
+            standings_ranks=sidebar_standings_ranks,
+        )
+
+        sidebar_item_unavailable_reason = item_service.get_item_unavailable_reason(
+            selected_week,
+            weekly_events,
+        )
+
+        if sidebar_item_unavailable_reason:
+            st.warning(sidebar_item_unavailable_reason)
+        else:
+            try:
+                sidebar_inventory_res = (
+                    supabase.table("team_inventory")
+                    .select("id, item_id, is_used, items(name, description, target_type)")
+                    .eq("league_id", league_id)
+                    .eq("roster_id", st.session_state["roster_id"])
+                    .eq("week", selected_week)
+                    .execute()
+                )
+                sidebar_inventory = sidebar_inventory_res.data or []
+            except Exception:
+                sidebar_inventory = []
+
+            if not sidebar_inventory:
+                st.info("Item drop not available yet.")
+            else:
+                sidebar_item = sidebar_inventory[0]
+                sidebar_item_info = sidebar_item.get("items") or {}
+                st.image(PROJECT_ROOT / "assets" / "item_box.png", width=56)
+                st.write(f"**{sidebar_item_info.get('name', 'Your item')}**")
+                st.caption(sidebar_item_info.get("description", ""))
+
+                if sidebar_item.get("is_used"):
+                    st.success("Selection submitted for this week.")
+                else:
+                    with st.form("sidebar_play_item_form"):
+                        sidebar_target_player_id = None
+                        sidebar_target_team = None
+                        sidebar_custom_text = None
+                        sidebar_target_type = sidebar_item_info.get("target_type")
+
+                        if sidebar_target_type == "ROSTER_PLAYER":
+                            sidebar_roster_players = sleeper_api.get_roster_players(
+                                league_id,
+                                st.session_state["roster_id"],
+                            ) or []
+                            sidebar_player_options = {
+                                f"{player['name']} ({player['pos']} - {player['team']})": player["id"]
+                                for player in sidebar_roster_players
+                            }
+                            if sidebar_player_options:
+                                sidebar_selected_player = st.selectbox(
+                                    "Select roster player",
+                                    list(sidebar_player_options),
+                                    key="sidebar_item_target_player",
+                                )
+                                sidebar_target_player_id = sidebar_player_options.get(
+                                    sidebar_selected_player
+                                )
+
+                        elif sidebar_target_type == "OPPONENT":
+                            sidebar_opponents = {
+                                name: roster_id
+                                for roster_id, name in roster_map.items()
+                                if str(roster_id) != str(st.session_state["roster_id"])
+                            }
+                            if sidebar_opponents:
+                                sidebar_selected_opponent = st.selectbox(
+                                    "Select target manager",
+                                    list(sidebar_opponents),
+                                    key="sidebar_item_target_opponent",
+                                )
+                                sidebar_target_team = sidebar_selected_opponent
+
+                        elif sidebar_target_type == "NFL_TEAM":
+                            sidebar_nfl_teams = sorted({
+                                player.get("team")
+                                for player in players_data.values()
+                                if player.get("team")
+                            })
+                            if sidebar_nfl_teams:
+                                sidebar_target_team = st.selectbox(
+                                    "Select NFL team",
+                                    sidebar_nfl_teams,
+                                    key="sidebar_item_target_nfl_team",
+                                )
+
+                        elif sidebar_target_type == "FREE_TEXT":
+                            sidebar_custom_text = st.text_input(
+                                "Enter player or target name",
+                                key="sidebar_item_custom_target",
+                            )
+
+                        sidebar_submitted = st.form_submit_button("Lock in selection")
+
+                    if sidebar_submitted:
+                        supabase.table("weekly_plays").insert({
+                            "league_id": league_id,
+                            "week": selected_week,
+                            "roster_id": st.session_state["roster_id"],
+                            "item_id": sidebar_item.get("item_id"),
+                            "target_player_id": sidebar_target_player_id,
+                            "target_nfl_team": sidebar_target_team,
+                            "custom_target": sidebar_custom_text,
+                        }).execute()
+                        supabase.table("team_inventory").update({
+                            "is_used": True,
+                        }).eq(
+                            "id", sidebar_item.get("id")
+                        ).eq("league_id", league_id).execute()
+                        st.sidebar.success("Selection saved.")
+                        st.rerun()
 
 # -----------------------------------------------------------------------------
 # TAB 2: Overall Season Standings (Card Layout)
@@ -704,11 +943,14 @@ with tab3:
 
     user_roster_id = st.session_state["roster_id"]
     # Roll weekly items or check for existing
-    if current_weekday >= 1:  # Tuesday (1) through Sunday (6)
+    if selected_week == 1:
+        st.info("Items are unavailable in Week 1.")
+    elif current_weekday >= 1:  # Tuesday (1) through Sunday (6)
         # 1. Fetch current standings/ranks map {roster_id: rank}
         standings_ranks = {
-            team["roster_id"]: rank 
-            for rank, team in enumerate(leaderboard, start=1)
+            team["roster_id"]: rank
+            for rank, team in enumerate(calculated_matchups, start=1)
+            if team.get("roster_id") is not None
         }
 
         # 2. Automatically check and roll drops if not already generated
@@ -719,25 +961,13 @@ with tab3:
             standings_ranks=standings_ranks,
         )
 
-        # Check for Active League Event
-        try:
-            event_res = (
-                supabase.table("league_events")
-                .select("*")
-                .eq("league_id", league_id)
-                .eq("week", selected_week)
-                .execute()
-            )
-            active_event = event_res.data[0] if event_res.data else None
-        except Exception:
-            active_event = None
+        item_unavailable_reason = item_service.get_item_unavailable_reason(
+            selected_week,
+            weekly_events,
+        )
 
-        if active_event:
-            st.info(
-                f"📢 **Week {selected_week} Global Event: {active_event['event_name']}**\n\n"
-                f"{active_event['description']}\n\n"
-                "*Individual item drops are replaced by this league-wide event for the week.*"
-            )
+        if item_unavailable_reason:
+            st.warning(item_unavailable_reason)
         elif not st.session_state["authenticated"]:
             st.warning("🔒 Please log in via the sidebar to view your rolled item and make selections.")
         else:
