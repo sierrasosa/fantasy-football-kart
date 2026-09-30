@@ -108,8 +108,28 @@ if "new_league_pins" not in st.session_state:
     st.session_state["new_league_pins"] = None
 if "remember_token" not in st.session_state:
     st.session_state["remember_token"] = None
+if "pending_login_cookie" not in st.session_state:
+    st.session_state["pending_login_cookie"] = None
+if "pending_cookie_delete" not in st.session_state:
+    st.session_state["pending_cookie_delete"] = False
 
-if not st.session_state["authenticated"]:
+if st.session_state["pending_login_cookie"]:
+    cookie_manager.set(
+        AUTH_COOKIE_NAME,
+        st.session_state["pending_login_cookie"],
+        max_age=30 * 24 * 60 * 60,
+        secure=True,
+        same_site="lax",
+        key="set_login_cookie",
+    )
+    st.session_state["pending_login_cookie"] = None
+
+deleting_login_cookie = st.session_state["pending_cookie_delete"]
+if deleting_login_cookie:
+    cookie_manager.delete(AUTH_COOKIE_NAME, key="delete_login_cookie")
+    st.session_state["pending_cookie_delete"] = False
+
+if not st.session_state["authenticated"] and not deleting_login_cookie:
     browser_token = cookie_manager.get(AUTH_COOKIE_NAME)
     if browser_token:
         try:
@@ -226,20 +246,13 @@ if not st.session_state["authenticated"]:
                 supabase.table("login_attempts").delete().eq("user_id", login_user_id).execute()
                 if remember_browser:
                     try:
-                        token, expires_at = create_login_session(
+                        token, _expires_at = create_login_session(
                             supabase,
                             login_user_id,
                             str(selected_login_roster.get("league_id")),
                         )
                         st.session_state["remember_token"] = token
-                        cookie_manager.set(
-                            AUTH_COOKIE_NAME,
-                            token,
-                            expires_at=expires_at,
-                            secure=True,
-                            same_site="lax",
-                            key="set_login_cookie",
-                        )
+                        st.session_state["pending_login_cookie"] = token
                     except Exception:
                         st.sidebar.warning(
                             "Logged in for this session, but remember-browser login could not be saved. "
@@ -249,7 +262,7 @@ if not st.session_state["authenticated"]:
                     old_token = cookie_manager.get(AUTH_COOKIE_NAME)
                     revoke_login_session(supabase, old_token)
                     st.session_state["remember_token"] = None
-                    cookie_manager.delete(AUTH_COOKIE_NAME, key="delete_login_cookie")
+                    st.session_state["pending_cookie_delete"] = True
                 st.rerun()
             record_failed_pin(supabase, login_user_id)
             st.session_state["login_error"] = (
@@ -368,7 +381,7 @@ else:
     if st.sidebar.button("Log Out"):
         remember_token = st.session_state.get("remember_token") or cookie_manager.get(AUTH_COOKIE_NAME)
         revoke_login_session(supabase, remember_token)
-        cookie_manager.delete(AUTH_COOKIE_NAME, key="logout_login_cookie")
+        st.session_state["pending_cookie_delete"] = True
         st.session_state["authenticated"] = False
         st.session_state["roster_id"] = None
         st.session_state["team_name"] = None
