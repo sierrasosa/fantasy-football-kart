@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Any, Dict
+from zoneinfo import ZoneInfo
 
 from helpers import sleeper_api
+
+APP_TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 
 def get_current_nfl_context() -> Dict[str, Any]:
@@ -10,7 +13,7 @@ def get_current_nfl_context() -> Dict[str, Any]:
     Falls back to the local date if the API does not respond with data.
     """
     nfl_state = sleeper_api.get_nfl_state() or {}
-    now = datetime.now()
+    now = datetime.now(APP_TIMEZONE)
 
     day_names = [
         "Monday",
