@@ -6,10 +6,18 @@ A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leag
 
 ## 📌 Features
 
-* **Sleeper API Integration:** Pulls real-time rosters, matchings, and live scores.
+* **Sleeper API Integration:** Pulls real-time rosters, matchups, and live scores.
 * **Chaos Item System:** Play game-changing items like freezing opponent players, boosting team points, or starting bench players.
 * **Manager Authentication:** Sleeper username lookup and per-manager PINs, with an optional 30-day remembered browser session.
 * **Supabase Backend:** League-scoped rosters, item inventories, events, and weekly submissions.
+
+## 📁 Project Layout
+
+- `database/`: Supabase schema/migrations, persistence services, and seed commands
+- `game_logic/`: scoring, timing, and item rules/operations
+- `helpers/`: Sleeper API integration
+- `data/`: item rules workbook and player snapshots
+- Root: Streamlit entry point, deployment configuration, requirements, and documentation
 
 ---
 
@@ -21,7 +29,7 @@ A custom, item-based "Mario Kart" chaos engine for Sleeper fantasy football leag
   * Schema supports independent leagues with composite league-scoped keys.
   * RLS is enabled; the app uses the server-only service-role key and anon has no table access.
 * [x] **Step 3: Core Logic & Secrets**
-  * Implemented Sleeper API client (`sleeper_api.py`) and scoring engine (`scoring.py`).
+  * Sleeper API client lives in `helpers/`; scoring and item rules live in `game_logic/`.
   * Configured `.streamlit/secrets.toml` with `SUPABASE_URL`, `SUPABASE_KEY`, `SUPABASE_SERVICE_KEY`, and `SLEEPER_LEAGUE_ID`.
 * [x] **Step 4: Seed Real League Data**
   * Commissioners initialize eligible leagues with a setup code; each manager receives a unique generated PIN.
@@ -49,7 +57,7 @@ For local development, create `.streamlit/secrets.toml`. On Streamlit Community 
 SUPABASE_URL = "https://your-project-ref.supabase.co"
 SUPABASE_SERVICE_KEY = "your-supabase-service-role-key"
 LEAGUE_SETUP_CODE = "a-long-random-secret-value"
-# Optional: used by the manual seed_rosters.py command.
+# Optional: used by the manual roster seed command.
 SLEEPER_LEAGUE_ID = "your-sleeper-league-id"
 ```
 
@@ -59,18 +67,18 @@ League initialization requires the Sleeper account to be a commissioner, except 
 
 ### 3. Database Initial Setup
 
-For a new database, run [supabase_schema.sql](supabase_schema.sql) in the Supabase SQL Editor. For the existing single-league database, first replace `REPLACE_WITH_EXISTING_LEAGUE_ID` in [supabase_migrate_multileague.sql](supabase_migrate_multileague.sql) with the current league ID, then run that migration once. If the database was already rebuilt or migrated before remember-browser support was added, run [supabase_login_sessions.sql](supabase_login_sessions.sql). Back up the database before migrations.
+For a new database, run [database/supabase_schema.sql](database/supabase_schema.sql) in the Supabase SQL Editor. For the existing single-league database, first replace `REPLACE_WITH_EXISTING_LEAGUE_ID` in [database/supabase_migrate_multileague.sql](database/supabase_migrate_multileague.sql) with the current league ID, then run that migration once. If the database was already rebuilt or migrated before remember-browser support was added, run [database/supabase_login_sessions.sql](database/supabase_login_sessions.sql). Back up the database before migrations.
 
 Remember-browser login stores a random bearer token in a secure, SameSite cookie and stores only its SHA-256 hash in Supabase. The cookie lasts 30 days and is revoked on logout. The Streamlit cookie component cannot mark the cookie HttpOnly, so the token is opaque but still accessible to JavaScript running on the app origin; avoid unsafe HTML and third-party scripts.
 
 ### 4. Seed Rosters & Run App
 
 ```bash
-# Optional: import item and event templates from item_rules.xlsx
-python seed_items.py
+# Optional: import item and event templates from data/item_rules.xlsx
+python -m database.seed_items
 
 # Optional manual roster initialization; the app also supports setup-code initialization
-python seed_rosters.py
+python -m database.seed_rosters
 
 # Launch Streamlit app locally
 streamlit run app.py

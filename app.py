@@ -1,14 +1,14 @@
-import sleeper_api
-import scoring
+from helpers import sleeper_api
+from game_logic import scoring, item_service
 import streamlit as st
 import extra_streamlit_components as stx
 import pandas as pd
-import item_service
 import os
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from supabase import Client, create_client
-from auth_service import (
+from database.auth_service import (
     create_login_session,
     get_login_session,
     pin_is_rate_limited,
@@ -17,7 +17,7 @@ from auth_service import (
     update_login_session_league,
     verify_pin,
 )
-from league_service import (
+from database.league_service import (
     get_commissioner_leagues,
     get_user_rosters,
     find_commissioner_leagues,
@@ -75,6 +75,9 @@ def make_roster_dataframe(roster_players: list[dict]) -> pd.DataFrame:
             ascending=[False, True, True],
         ).drop(columns=["sort_pos"])
     return roster_df
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 # -----------------------------------------------------------------------------
@@ -256,7 +259,7 @@ if not st.session_state["authenticated"]:
                     except Exception:
                         st.sidebar.warning(
                             "Logged in for this session, but remember-browser login could not be saved. "
-                            "Apply supabase_login_sessions.sql to enable it."
+                            "Apply database/supabase_login_sessions.sql to enable it."
                         )
                 else:
                     old_token = cookie_manager.get(AUTH_COOKIE_NAME)
@@ -835,7 +838,7 @@ with tab3:
 with tab4:
     st.header("🏈 NFL Player Database")
 
-    pruned_file_path = "pruned_players.json"
+    pruned_file_path = PROJECT_ROOT / "data" / "pruned_players.json"
 
     if not os.path.exists(pruned_file_path):
         st.error(f"⚠️ `{pruned_file_path}` not found in root directory.")

@@ -3,6 +3,6 @@ ffenv/
 __pycache__/
 *.pyc
 .env
-players.json
+/data/players.json
 *.ipynb
 *.sql

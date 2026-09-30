@@ -8,7 +8,7 @@ At the top of [app.py](app.py), the app initializes the Streamlit page and conne
 
 - It sets the UI page title and icon using `st.set_page_config(...)`.
 - It defines `init_supabase()` and creates a cached Supabase client using secrets from `st.secrets`.
-- It includes a helper, `hash_pin()`, which hashes the manager PIN using SHA-256 before comparing it to a stored value.
+- PIN hashing and validation are handled by `database/auth_service.py` using salted PBKDF2, with legacy SHA-256 hash compatibility.
 
 The app uses the Supabase service-role key from Streamlit secrets on the Python server. RLS is enabled and anon has no direct table access; service-role operations bypass RLS and must remain behind the app's checks.
 
@@ -81,7 +81,7 @@ The app calls the scoring function:
 
 - `scoring.calculate_modified_scores(raw_matchups, weekly_plays, players_data)`
 
-This is the main scoring engine for affecting scores with custom item mechanics. The function is defined in [scoring.py](scoring.py).
+This is the main scoring engine for affecting scores with custom item mechanics. The function is defined in [game_logic/scoring.py](game_logic/scoring.py).
 
 The scoring logic:
 
@@ -180,7 +180,7 @@ This makes the item system function as a weekly fantasy-game mechanic layered on
 
 ## 11. Tab 4: Player database
 
-This tab loads a pruned player database from `pruned_players.json`.
+This tab loads a pruned player database from `data/pruned_players.json`.
 
 The app:
 
@@ -208,14 +208,14 @@ This tab is a placeholder UI for future commissioner functionality. It currently
 The app combines a few layers:
 
 - Streamlit UI layer: all visible tabs and forms
-- `auth_service.py`: PIN hashing/verification and persistent login rate limiting
-- `league_service.py`: roster lookup, commissioner league discovery, and league initialization persistence
-- `item_service.py`: league-scoped event checks and weekly item-drop persistence
-- `sleeper_api.py`: Sleeper account, league, roster, and player data
+- `database/auth_service.py`: PIN hashing/verification and persistent login rate limiting
+- `database/league_service.py`: roster lookup, commissioner league discovery, and league initialization persistence
+- `game_logic/item_service.py`: league-scoped event checks and weekly item-drop persistence
+- `helpers/sleeper_api.py`: Sleeper account, league, roster, and player data
 - Supabase service client: persistent roster, inventory, weekly plays, and event data
 - custom scoring logic: modifying raw fantasy points using item effects
 
-`app.py` owns Streamlit widgets and session-state transitions. Service modules own reusable authentication and data operations so they can be tested independently of the rendered UI. `item_engine.py` remains as a compatibility import for weekly drop generation.
+`app.py` owns Streamlit widgets and session-state transitions. `database/`, `game_logic/`, and `helpers/` separate persistence, game rules, and external API support. Service modules can be tested independently of the rendered UI. `game_logic/item_engine.py` remains as a compatibility import for weekly drop generation.
 
 The app behaves like a dashboard and game engine for a fantasy football / Mario Kart-themed custom league system.
 

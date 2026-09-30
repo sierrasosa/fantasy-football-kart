@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import streamlit as st
+from pathlib import Path
 from urllib.parse import quote
 from typing import Optional, List, Dict, Any
 
@@ -104,7 +105,7 @@ def get_nfl_players() -> dict:
     Reads local players.json snapshot file to skip external Sleeper API requests.
     Caches result for 24 hours.
     """
-    file_path = "pruned_players.json"
+    file_path = Path(__file__).resolve().parent.parent / "data" / "pruned_players.json"
     
     if not os.path.exists(file_path):
         st.error(f"⚠️ '{file_path}' not found in root directory. Please upload your snapshot file.")

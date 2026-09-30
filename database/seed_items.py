@@ -1,5 +1,6 @@
 import pandas as pd
 from supabase import create_client
+from pathlib import Path
 
 # Initialize Supabase Client
 import streamlit as st
@@ -8,7 +9,7 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = st.secrets["SUPABASE_SERVICE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-excel_file = "item_rules.xlsx"
+excel_file = Path(__file__).resolve().parent.parent / "data" / "item_rules.xlsx"
 
 # -----------------------------------------------------------------------------
 # 1. Parse & Seed Standard Items (Sheet: 'Player Items')

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict
 
-import sleeper_api
+from helpers import sleeper_api
 
 
 def get_current_nfl_context() -> Dict[str, Any]:

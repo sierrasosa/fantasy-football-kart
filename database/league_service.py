@@ -1,8 +1,8 @@
 import hmac
 import requests
-import sleeper_api
+from helpers import sleeper_api
 import streamlit as st
-from auth_service import generate_pin, hash_pin
+from database.auth_service import generate_pin, hash_pin
 
 
 def get_user_rosters(supabase_client, user_id: str, include_pin_hash: bool = False) -> list[dict]:

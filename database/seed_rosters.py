@@ -1,8 +1,8 @@
 import streamlit as st
 from supabase import create_client
 
-from auth_service import generate_pin, hash_pin, verify_pin
-from league_service import sync_sleeper_rosters
+from database.auth_service import generate_pin, hash_pin, verify_pin
+from database.league_service import sync_sleeper_rosters
 
 
 if __name__ == "__main__":

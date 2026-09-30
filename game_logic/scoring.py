@@ -21,7 +21,7 @@ def calculate_modified_scores(matchups, weekly_plays, players_data):
     Args:
         matchups (list): Matchup objects from Sleeper API.
         weekly_plays (list): List of play dicts from Supabase 'weekly_plays' table.
-        players_data (dict): Filtered NFL player database from sleeper_api.py.
+        players_data (dict): Filtered NFL player database from helpers/sleeper_api.py.
         
     Returns:
         list: Calculated scores and breakdown logs for display in Streamlit.
