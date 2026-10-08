@@ -33,6 +33,64 @@ def build_lineup_slots(roster_positions: list[str]) -> list[dict]:
     return lineup_slots
 
 
+def assign_starter_slots(
+    starters: list[str],
+    roster_positions: list[str],
+    players_data: dict,
+) -> dict[str, str]:
+    """Map starter IDs to compatible configured lineup slots."""
+    lineup_slots = build_lineup_slots(roster_positions)
+    player_positions = {
+        str(player_id): str(
+            players_data.get(str(player_id), {}).get("position")
+            or players_data.get(str(player_id), {}).get("pos")
+            or ""
+        ).upper()
+        for player_id in starters
+    }
+    candidates_by_player = {
+        player_id: [
+            index for index, slot in enumerate(lineup_slots)
+            if player_positions[player_id] in slot["eligible_positions"]
+        ]
+        for player_id in player_positions
+    }
+    ordered_players = sorted(
+        (
+            player_id for player_id in player_positions
+            if candidates_by_player[player_id]
+        ),
+        key=lambda player_id: (
+            len(candidates_by_player[player_id]),
+            player_id,
+        ),
+    )
+
+    slot_to_player: dict[int, str] = {}
+
+    def assign_player(player_id: str, visited_slots: set[int]) -> bool:
+        for slot_index in candidates_by_player[player_id]:
+            if slot_index in visited_slots:
+                continue
+            visited_slots.add(slot_index)
+            assigned_player = slot_to_player.get(slot_index)
+            if (
+                assigned_player is None
+                or assign_player(assigned_player, visited_slots)
+            ):
+                slot_to_player[slot_index] = player_id
+                return True
+        return False
+
+    for player_id in reversed(ordered_players):
+        assign_player(player_id, set())
+
+    return {
+        player_id: lineup_slots[slot_index]["slot"]
+        for slot_index, player_id in slot_to_player.items()
+    }
+
+
 def _player_name(player_id: str, player: dict) -> str:
     return (
         player.get("name")
@@ -116,27 +174,14 @@ def build_random_item_selection(
                 if player.get("is_starter")
             ]
         else:
-            eligible_players = []
-            if week > 1:
-                previous_matchups = sleeper_api.get_league_matchups(
-                    league_id,
-                    week - 1,
-                ) or []
-                previous_matchup = next(
-                    (
-                        matchup for matchup in previous_matchups
-                        if str(matchup.get("roster_id")) == str(roster_id)
-                    ),
-                    None,
-                )
-                previous_player_ids = {
-                    str(player_id)
-                    for player_id in (previous_matchup or {}).get("players", [])
-                }
-                eligible_players = [
+            eligible_players = (
+                [
                     player for player in roster_players
-                    if str(player.get("id")) in previous_player_ids
+                    if player.get("is_starter")
                 ]
+                if week > 1
+                else []
+            )
 
         if not eligible_players:
             raise ValueError(f"No eligible roster players are available for {item_id}.")
@@ -366,22 +411,10 @@ def render_item_selection_form(
 
     recall_options = {}
     if mode == "recall_player" and week > 1:
-        previous_matchups = sleeper_api.get_league_matchups(league_id, week - 1) or []
-        previous_matchup = next(
-            (
-                matchup for matchup in previous_matchups
-                if str(matchup.get("roster_id")) == str(user_roster_id)
-            ),
-            None,
-        )
-        previous_player_ids = {
-            str(player_id)
-            for player_id in (previous_matchup or {}).get("players", [])
-        }
         recall_options = {
             _player_label(str(player["id"]), player): str(player["id"])
             for player in user_roster_players
-            if str(player.get("id")) in previous_player_ids
+            if player.get("is_starter")
         }
 
     trade_target_options = {}
@@ -467,8 +500,10 @@ def render_item_selection_form(
                 selection["player_id"] = player_options[selected_player]
 
         elif mode == "recall_player":
+            if week <= 1:
+                st.warning("Recall is unavailable in Week 1.")
             selected_player = st.selectbox(
-                "Select a player rostered both weeks",
+                "Select one of your current starters",
                 list(recall_options),
                 index=None,
                 key=f"{form_key}_recall_player",

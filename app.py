@@ -1,11 +1,15 @@
 from helpers import sleeper_api
 from game_logic import scoring, item_service
 from game_logic.item_form import (
+    assign_starter_slots,
     build_random_item_selection,
     describe_item_selection,
     render_item_selection_form,
 )
-from game_logic.modifier_logic import build_weekly_player_modifiers
+from game_logic.modifier_logic import (
+    build_weekly_nfl_team_effects,
+    build_weekly_player_modifiers,
+)
 from game_logic.timing_logic import (
     get_current_nfl_context,
     resolve_weekly_timing_context,
@@ -61,35 +65,139 @@ def get_cookie_manager():
 
 cookie_manager = get_cookie_manager()
 AUTH_COOKIE_NAME = "ffkart_auth_v1"
+INJURY_STATUS_ICONS = {
+    "ACTIVE": "✅",
+    "QUESTIONABLE": "❓",
+    "DOUBTFUL": "⚠️",
+    "OUT": "❌",
+    "IR": "🏥",
+    "INACTIVE": "⛔",
+}
+
+
+def format_injury_status(status: object) -> str:
+    """Add a status icon while preserving the underlying injury designation."""
+    status_text = str(status or "Active").strip()
+    icon = INJURY_STATUS_ICONS.get(status_text.upper())
+    return f"{icon} {status_text}" if icon else status_text
 
 
 def make_roster_dataframe(
     roster_players: list[dict],
     modifiers_by_player: dict[str, str] | None = None,
+    modified_points_by_player: dict[str, float | None] | None = None,
+    starter_slots_by_player: dict[str, str] | None = None,
+    effect_icons_by_player: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Build a consistently sorted roster table with weekly points and injuries."""
     modifiers_by_player = modifiers_by_player or {}
-    roster_df = pd.DataFrame([
-        {
-            "Player": player.get("name", "Unknown"),
-            "Pos": player.get("pos", "N/A"),
+    modified_points_by_player = modified_points_by_player or {}
+    starter_slots_by_player = starter_slots_by_player or {}
+    effect_icons_by_player = effect_icons_by_player or {}
+    rows = []
+    for player in roster_players:
+        player_id = str(player.get("id"))
+        player_name = str(player.get("name") or "Unknown")
+        effect_icons = effect_icons_by_player.get(player_id, "")
+        modified_points = modified_points_by_player.get(
+            player_id,
+            player.get("points"),
+        )
+        rows.append({
+            "Player ID": player_id,
+            "Player": f"{player_name} {effect_icons}".rstrip(),
+            "Pos": (
+                (
+                    f"🏈 {starter_slots_by_player[player_id]} · "
+                    f"{player.get('pos', 'N/A')}"
+                    if player.get("is_starter")
+                    and player_id in starter_slots_by_player
+                    else (
+                        f"{'🏈' if player.get('is_starter') else '🪑'} "
+                        f"{player.get('pos', 'N/A')}"
+                    )
+                )
+            ),
             "Team": player.get("team", "FA"),
-            "Starter": "Yes" if player.get("is_starter") else "No",
             "Points": player.get("points"),
-            "Modifier": modifiers_by_player.get(str(player.get("id")), "—"),
-            "Injury Status": player.get("injury_status", "Active"),
-        }
-        for player in roster_players
-    ])
+            "Modifier": modifiers_by_player.get(player_id, "—"),
+            "After Modifiers": (
+                round(modified_points, 2)
+                if isinstance(modified_points, (int, float))
+                else None
+            ),
+            "Injury Status": format_injury_status(
+                player.get("injury_status")
+            ),
+        })
+    roster_df = pd.DataFrame(rows)
     if not roster_df.empty:
         position_order = ["QB", "RB", "WR", "TE", "K", "DEF", "FLEX", "BN"]
-        roster_df["sort_pos"] = roster_df["Pos"].map(
-            {position: index for index, position in enumerate(position_order)}
-        ).fillna(len(position_order))
+        lineup_slot_order = {
+            "QB": 0,
+            "RB": 1,
+            "WR": 2,
+            "TE": 3,
+            "FLEX": 4,
+            "REC_FLEX": 4,
+            "WRRB_FLEX": 4,
+            "SUPER_FLEX": 4,
+            "IDP_FLEX": 4,
+            "K": 5,
+            "DEF": 6,
+        }
+        sort_roles = []
+        sort_positions = []
+        sort_slot_numbers = []
+        for player in roster_players:
+            player_id = str(player.get("id"))
+            slot_label = starter_slots_by_player.get(player_id)
+            if player.get("is_starter") and slot_label:
+                slot_parts = slot_label.split()
+                slot_type = slot_parts[0]
+                sort_roles.append(0)
+                sort_positions.append(
+                    lineup_slot_order.get(slot_type, len(lineup_slot_order))
+                )
+                slot_number = (
+                    int(slot_parts[1])
+                    if len(slot_parts) > 1 and slot_parts[1].isdigit()
+                    else 0
+                )
+                sort_slot_numbers.append(slot_number)
+            elif player.get("is_starter"):
+                sort_roles.append(0)
+                sort_positions.append(
+                    len(lineup_slot_order)
+                    + position_order.index(player.get("pos"))
+                    if player.get("pos") in position_order
+                    else len(lineup_slot_order) + len(position_order)
+                )
+                sort_slot_numbers.append(0)
+            else:
+                sort_roles.append(1)
+                sort_positions.append(
+                    position_order.index(player.get("pos"))
+                    if player.get("pos") in position_order
+                    else len(position_order)
+                )
+                sort_slot_numbers.append(0)
+        roster_df["sort_role"] = sort_roles
+        roster_df["sort_pos"] = sort_positions
+        roster_df["sort_slot_number"] = sort_slot_numbers
         roster_df = roster_df.sort_values(
-            by=["Starter", "sort_pos", "Player"],
-            ascending=[False, True, True],
-        ).drop(columns=["sort_pos"])
+            by=["sort_role", "sort_pos", "sort_slot_number", "Player"],
+            ascending=[True, True, True, True],
+        ).drop(
+            columns=[
+                "Player ID",
+                "sort_pos",
+                "sort_role",
+                "sort_slot_number",
+            ]
+        )
+    else:
+        roster_df = roster_df.drop(columns=["Player ID"])
     return roster_df
 
 
@@ -617,6 +725,17 @@ with st.spinner("Loading NFL player database..."):
 
 raw_matchups = sleeper_api.get_league_matchups(league_id, selected_week) or []
 weekly_matchups_cache = {selected_week: raw_matchups}
+try:
+    league_info = sleeper_api.get_league_info(league_id) or {}
+except Exception as exc:
+    league_info = {}
+    st.warning(f"Could not load lineup slots; showing player positions only: {exc}")
+league_settings = league_info.get("settings") or {}
+league_roster_positions = (
+    league_info.get("roster_positions")
+    or league_settings.get("roster_positions")
+    or []
+)
 
 
 def get_week_matchups(week: int) -> list[dict]:
@@ -687,9 +806,21 @@ inventory_by_roster = {
     for item in weekly_inventory
 }
 
+previous_week_matchups = (
+    get_week_matchups(selected_week - 1)
+    if selected_week > 1
+    else []
+)
 calculated_matchups = scoring.calculate_modified_scores(
-    raw_matchups, weekly_plays, players_data
+    raw_matchups,
+    weekly_plays,
+    players_data,
+    previous_week_matchups,
 ) or []
+calculated_matchups_by_roster = {
+    str(team.get("roster_id")): team
+    for team in calculated_matchups
+}
 
 # Build roster mapping from Supabase
 roster_map = {}
@@ -759,7 +890,12 @@ if item_preview:
     else:
         st.session_state.pop("item_preview", None)
 
-player_database_modifiers, roster_player_modifiers = build_weekly_player_modifiers(
+(
+    player_database_modifiers,
+    roster_player_modifiers,
+    player_database_effect_icons,
+    roster_player_effect_icons,
+) = build_weekly_player_modifiers(
     players_data,
     modifier_plays,
     weekly_events,
@@ -795,6 +931,17 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # -----------------------------------------------------------------------------
 with tab1:
     st.header(f"Week {selected_week} Race Standings")
+
+    nfl_team_effect_rows = build_weekly_nfl_team_effects(weekly_plays)
+    st.subheader("NFL Teams with Item Effects")
+    if nfl_team_effect_rows:
+        st.dataframe(
+            pd.DataFrame(nfl_team_effect_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("No NFL teams have item effects this week.")
 
     if not calculated_matchups:
         st.info("No score data available for this week yet.")
@@ -867,6 +1014,19 @@ with tab1:
                     r_id,
                     matchup_data=matchup_data_by_roster.get(str(r_id)),
                 ) or []
+                starter_slots = assign_starter_slots(
+                    [
+                        str(player_id)
+                        for player_id in (
+                            matchup_data_by_roster.get(str(r_id), {}).get(
+                                "starters"
+                            )
+                            or []
+                        )
+                    ],
+                    league_roster_positions,
+                    players_data,
+                )
                 roster_item = inventory_by_roster.get(str(r_id))
                 item_info = (roster_item or {}).get("items") or {}
 
@@ -882,6 +1042,9 @@ with tab1:
                             make_roster_dataframe(
                                 roster_players,
                                 roster_player_modifiers.get(str(r_id), {}),
+                                team.get("player_scores", {}),
+                                starter_slots,
+                                roster_player_effect_icons.get(str(r_id), {}),
                             ),
                             use_container_width=True,
                             hide_index=True,
@@ -1242,11 +1405,40 @@ with tab3:
         matchup_data=matchup_data_by_roster.get(str(user_roster_id)),
     ) or []
     if user_roster_players:
+        strategize_calculated_matchups = scoring.calculate_modified_scores(
+            raw_matchups,
+            modifier_plays,
+            players_data,
+            previous_week_matchups,
+        )
+        strategize_team = next(
+            (
+                team for team in strategize_calculated_matchups
+                if str(team.get("roster_id")) == str(user_roster_id)
+            ),
+            {},
+        )
+        strategize_starter_slots = assign_starter_slots(
+            [
+                str(player_id)
+                for player_id in (
+                    matchup_data_by_roster.get(str(user_roster_id), {}).get(
+                        "starters"
+                    )
+                    or []
+                )
+            ],
+            league_roster_positions,
+            players_data,
+        )
         with st.expander(f"Your roster · Week {selected_week}", expanded=True):
             st.dataframe(
                 make_roster_dataframe(
                     user_roster_players,
                     roster_player_modifiers.get(str(user_roster_id), {}),
+                    strategize_team.get("player_scores", {}),
+                    strategize_starter_slots,
+                    roster_player_effect_icons.get(str(user_roster_id), {}),
                 ),
                 use_container_width=True,
                 hide_index=True,
@@ -1266,6 +1458,18 @@ with tab3:
         with open(pruned_file_path, "r", encoding="utf-8") as f:
             pruned_players = json.load(f)
 
+        roster_names_by_id = {
+            str(roster_id): team_name
+            for roster_id, team_name in roster_map.items()
+        }
+        player_owners_by_id = {}
+        for roster_id, matchup in matchup_data_by_roster.items():
+            for player_id in matchup.get("players") or []:
+                player_owners_by_id[str(player_id)] = roster_names_by_id.get(
+                    roster_id,
+                    f"Roster {roster_id}",
+                )
+
         # 2. Format player data into tabular format
         formatted_players = []
         for p_id, info in pruned_players.items():
@@ -1276,17 +1480,22 @@ with tab3:
                     or f"Player {p_id}"
                 )
 
-                years_exp = info.get("years_exp")
-                is_rookie = "Yes" if years_exp == 0 or years_exp == "0" else "No"
-
                 formatted_players.append({
-                    "Name": full_name,
+                    "Name": (
+                        f"{full_name} "
+                        f"{player_database_effect_icons.get(str(p_id), '')}"
+                    ).rstrip(),
                     "Position": info.get("position") or "N/A",
                     "Team": info.get("team") or "FA",
-                    "Rookie": is_rookie,
+                    "Current Owner": player_owners_by_id.get(
+                        str(p_id),
+                        "Free Agent",
+                    ),
                     "Depth Chart Order": info.get("depth_chart_order", "N/A"),
                     "Modifier": player_database_modifiers.get(str(p_id), "—"),
-                    "Injury Status": info.get("injury_status") or "Active",
+                    "Injury Status": format_injury_status(
+                        info.get("injury_status")
+                    ),
                 })
 
         df_players = pd.DataFrame(formatted_players)
@@ -1303,8 +1512,7 @@ with tab3:
 
             # 3. Expandable Filter Section with Dropdowns
             with st.expander("🔎 Filter Players", expanded=True):
-                col1, col2 = st.columns(2)
-                col3, col4 = st.columns(2)
+                col1, col2, col3, col4 = st.columns(4)
 
                 with col1:
                     name_search = st.text_input("Search Name")
@@ -1319,8 +1527,13 @@ with tab3:
                     selected_positions = st.multiselect("Position", options=pos_options)
 
                 with col4:
-                    rookie_options = sorted([r for r in df_players["Rookie"].unique() if r])
-                    selected_rookie = st.multiselect("Rookie", options=rookie_options)
+                    owner_options = sorted(
+                        df_players["Current Owner"].dropna().unique().tolist()
+                    )
+                    selected_owners = st.multiselect(
+                        "Owner",
+                        options=owner_options,
+                    )
 
             filtered_df = df_players.copy()
 
@@ -1333,24 +1546,13 @@ with tab3:
             if selected_positions:
                 filtered_df = filtered_df[filtered_df["Position"].isin(selected_positions)]
 
-            if selected_rookie:
-                filtered_df = filtered_df[filtered_df["Rookie"].isin(selected_rookie)]
+            if selected_owners:
+                filtered_df = filtered_df[
+                    filtered_df["Current Owner"].isin(selected_owners)
+                ]
 
-            # 4. Apply styling to grey out inactive/injured players by severity
-            def style_ir_players(row):
-                """Greys out injured players by injury designation severity."""
-                injury_status = str(row.get("Injury Status", "")).upper()
-
-                if injury_status in {"IR", "INACTIVE"}:
-                    return ["background-color: #3f444c; color: #a0a6b0;"] * len(row)
-                if injury_status in {"OUT", "DOUBTFUL", "QUESTIONABLE"}:
-                    return ["background-color: #5b4d42; color: #d9c8b2;"] * len(row)
-                return [""] * len(row)
-
-            styled_df = filtered_df.style.apply(style_ir_players, axis=1)
-
-            # 5. Display rendered styled table
-            st.dataframe(styled_df, width="stretch", hide_index=True)
+            # 4. Display the player database without injury-status row shading
+            st.dataframe(filtered_df, width="stretch", hide_index=True)
 
 # -----------------------------------------------------------------------------
 # TAB 4: Commissioner Administration

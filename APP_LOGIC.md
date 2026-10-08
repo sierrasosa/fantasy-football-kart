@@ -83,16 +83,24 @@ The app calls the scoring function:
 
 This is the main scoring engine for affecting scores with custom item mechanics. The function is defined in [game_logic/scoring.py](game_logic/scoring.py).
 
-The scoring logic:
+The scoring logic starts with Sleeper's team score, then adjusts starter points
+for team/division byes and supercharges, Superstar, and Snow Game/Dome Game.
+Snow Game/Dome Game affects only the roster's RBs and WRs: the selected
+position receives 2x and the other of those two positions receives 0.5x;
+other positions are unchanged.
+Mushroom, Hyperflex, Ultraflex (for NFL players in the player database), and
+Golden Mushroom add eligible player points. Bullet Bill uses the chosen
+player's adjusted points ten times; Smash Ball replaces the team's score with
+its chosen dream lineup, ignoring team/division bye effects for that lineup.
+Recall replaces one current starter's score with that player's score from the
+previous week.
+Scores return with `roster_id`, `raw_score`, `modified_score`, and an `effects`
+breakdown.
 
-- looks at all matchup scores,
-- checks for active item effects like freeze, double team, and bench boost,
-- modifies the players’ and teams’ points accordingly,
-- returns a list of matchup records with:
-  - `roster_id`
-  - `raw_score`
-  - `modified_score`
-  - `effects`
+Master Ball trades, Shell/Triple Shell transfers, non-NFL Ultraflex players,
+and league-wide scoring events still need scoring implementation.
+Those pending item mechanics are called out in the effects breakdown rather
+than silently changing a score.
 
 The app then sorts these modified results to create rankings.
 
@@ -125,6 +133,7 @@ This tab shows the current week’s standings after item effects have been appli
 The flow is:
 
 - take `calculated_matchups`
+- show NFL teams targeted by team/division Bye and Supercharge items
 - sort by highest `modified_score` first
 - assign rank positions and GP points based on placement
 - build a row for each team with:
@@ -157,7 +166,23 @@ This is how the app tracks long-term championship standings.
 ## 10. Tab 3: Strategize
 
 Strategize shows the manager's roster followed by the NFL player database. The
-database supports name, team, position, and rookie filters.
+roster identifies starters and bench players with distinct role labels and
+shows each player's score after implemented modifiers. Starter labels include
+the assigned league lineup slot (for example, `FLEX 1 · RB`); bench labels
+continue to show the player's position. Starters are ordered by lineup slot:
+QB, RB, WR, TE, FLEX, K, and DEF, with numbered slots in ascending order;
+bench players follow. Effect icons appear after affected player names in the
+roster and player database: 🚫 bye (shown as `0x`), ✨ supercharge, 🍄 mushroom,
+❄️ snow game, 🏟️ dome game, 🔄 Recall, ♾️ Hyperflex/Ultraflex, ⭐ Superstar,
+🚀 Bullet Bill, and 🪩 Smash Ball. Master Ball has no icon. Shell icons are not
+shown until the item identifies a specific affected player. The database
+supports name, team, position, and current owner filters. Injury statuses also show
+icons while retaining their text: ✅ Active, ❓ Questionable, ⚠️ Doubtful,
+❌ Out, 🏥 IR, and ⛔ Inactive. The player database does not shade rows based on
+injury status. Eligible rookies show 🐣 during Rookie of the Week.
+The player database omits its Rookie column and instead shows each player's
+current-week roster owner, or `Free Agent` if the player is not on a league
+roster.
 
 The sidebar contains the item selection controls. Managers can test a selection
 to preview its existing player modifier labels on the roster and player database;

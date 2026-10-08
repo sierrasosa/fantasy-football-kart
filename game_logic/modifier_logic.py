@@ -2,7 +2,7 @@
 
 import json
 
-from game_logic.item_inputs import NFL_DIVISION_TEAMS
+from game_logic.item_inputs import NFL_DIVISION_TEAMS, NFL_TEAM_NAMES
 
 
 def _selection_for_play(play: dict) -> dict:
@@ -63,13 +63,25 @@ def build_weekly_player_modifiers(
     weekly_events: list[dict],
     matchup_data_by_roster: dict,
     roster_map: dict,
-) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Return player-database and per-roster modifier display values."""
+) -> tuple[
+    dict[str, str],
+    dict[str, dict[str, str]],
+    dict[str, str],
+    dict[str, dict[str, str]],
+]:
+    """Return player-database and per-roster modifier labels and icons."""
     league_effects: dict[str, list[tuple[str, float | None]]] = {}
     roster_effects: dict[str, dict[str, list[tuple[str, float | None]]]] = {}
+    league_effect_icons: dict[str, list[str]] = {}
+    roster_effect_icons: dict[str, dict[str, list[str]]] = {}
 
     def add_league_effect(player_id: str, label: str, factor: float | None = None):
         league_effects.setdefault(str(player_id), []).append((label, factor))
+
+    def add_league_icon(player_id: str, icon: str) -> None:
+        icons = league_effect_icons.setdefault(str(player_id), [])
+        if icon not in icons:
+            icons.append(icon)
 
     def add_roster_effect(
         roster_id: int | str,
@@ -80,6 +92,17 @@ def build_weekly_player_modifiers(
         roster_effects.setdefault(str(roster_id), {}).setdefault(
             str(player_id), []
         ).append((label, factor))
+
+    def add_roster_icon(
+        roster_id: int | str,
+        player_id: str,
+        icon: str,
+    ) -> None:
+        icons = roster_effect_icons.setdefault(str(roster_id), {}).setdefault(
+            str(player_id), []
+        )
+        if icon not in icons:
+            icons.append(icon)
 
     roster_players = {
         str(roster_id): [str(player_id) for player_id in (matchup.get("players") or [])]
@@ -100,6 +123,7 @@ def build_weekly_player_modifiers(
                     is_rookie = False
                 if is_rookie:
                     add_league_effect(str(player_id), "2x", 2.0)
+                    add_league_icon(str(player_id), "🐣")
         elif event_name == "the price is right":
             for roster_id, matchup in matchup_data_by_roster.items():
                 points = matchup.get("points")
@@ -123,26 +147,33 @@ def build_weekly_player_modifiers(
         if item_id in {"NFL_TEAM_BYE", "NFL_DIVISION_BYE"}:
             for player_id, player in players_data.items():
                 if player.get("team") in team_codes:
-                    add_league_effect(str(player_id), "OUT")
+                    add_league_effect(str(player_id), "0x", 0.0)
+                    add_league_icon(str(player_id), "🚫")
         elif item_id in {"NFL_TEAM_SUPERCHARGE", "NFL_DIVISION_SUPERCHARGE"}:
             for player_id, player in players_data.items():
                 if player.get("team") in team_codes:
                     add_league_effect(str(player_id), "2x", 2.0)
-                    add_league_effect(str(player_id), "SHELL IMMUNE")
+                    add_league_icon(str(player_id), "✨")
 
         player_id = selection.get("player_id") or play.get("target_player_id")
         if item_id == "MUSHROOM" and player_id:
             add_roster_effect(roster_id, player_id, "+ACTIVE")
+            add_roster_icon(roster_id, player_id, "🍄")
         elif item_id == "RECALL" and player_id:
             add_roster_effect(roster_id, player_id, "RECALL")
+            add_roster_icon(roster_id, player_id, "🔄")
         elif item_id == "SUPERSTAR" and player_id:
             add_roster_effect(roster_id, player_id, "2x", 2.0)
+            add_roster_icon(roster_id, player_id, "⭐")
             for teammate_id in roster_players.get(roster_id, []):
                 add_roster_effect(roster_id, teammate_id, "SHELL IMMUNE")
         elif item_id == "BULLET_BILL" and player_id:
             add_roster_effect(roster_id, player_id, "10x", 10.0)
+            add_roster_effect(roster_id, player_id, "SHELL IMMUNE")
+            add_roster_icon(roster_id, player_id, "🚀")
         elif item_id == "HYPERFLEX" and player_id:
             add_roster_effect(roster_id, player_id, "+ACTIVE")
+            add_roster_icon(roster_id, player_id, "♾️")
         elif item_id == "ULTRAFLEX":
             name = str(selection.get("player_name") or "").strip().casefold()
             matching_ids = [
@@ -156,15 +187,29 @@ def build_weekly_player_modifiers(
             ]
             for candidate_id in matching_ids:
                 add_roster_effect(roster_id, candidate_id, "+ACTIVE")
+                add_roster_icon(roster_id, candidate_id, "♾️")
         elif item_id == "GOLDEN_MUSHROOM":
             for bench_id in set(roster_players.get(roster_id, [])) - roster_starters.get(roster_id, set()):
                 add_roster_effect(roster_id, bench_id, "+ACTIVE")
+                add_roster_icon(roster_id, bench_id, "🍄")
         elif item_id == "SNOW_GAME_DOME_GAME":
-            selected_position = selection.get("position")
-            if selected_position:
+            selected_position = str(selection.get("position") or "").upper()
+            if selected_position in {"RB", "WR"}:
+                icon = "❄️" if selected_position == "WR" else "🏟️"
                 for teammate_id in roster_players.get(roster_id, []):
-                    factor = 2.0 if _player_position(teammate_id, players_data) == selected_position else 0.5
+                    teammate_position = _player_position(
+                        teammate_id,
+                        players_data,
+                    )
+                    if teammate_position not in {"RB", "WR"}:
+                        continue
+                    factor = (
+                        2.0
+                        if teammate_position == selected_position
+                        else 0.5
+                    )
                     add_roster_effect(roster_id, teammate_id, f"{factor:g}x", factor)
+                    add_roster_icon(roster_id, teammate_id, icon)
         elif item_id == "MASTER_BALL":
             target_player_id = (selection.get("target") or {}).get("player_id")
             if target_player_id:
@@ -183,18 +228,11 @@ def build_weekly_player_modifiers(
                     current_player_id,
                     "DREAM" if current_player_id in lineup_ids else "OUT",
                 )
+                add_roster_icon(roster_id, current_player_id, "🪩")
             for lineup_player_id in lineup_ids:
                 if lineup_player_id not in current_player_ids:
                     add_roster_effect(roster_id, lineup_player_id, "DREAM")
-
-        elif item_id in {"SHELL", "TRIPLE_SHELL"}:
-            target_roster_ids = selection.get("target_roster_ids") or []
-            if selection.get("target_roster_id") is not None:
-                target_roster_ids.append(selection["target_roster_id"])
-            for target_roster_id in target_roster_ids:
-                target_roster_id = str(target_roster_id)
-                for target_player_id in roster_players.get(target_roster_id, []):
-                    add_roster_effect(target_roster_id, target_player_id, "SHELL RISK")
+                    add_roster_icon(roster_id, lineup_player_id, "🪩")
 
     roster_modifier_maps = {}
     for roster_id, players in roster_players.items():
@@ -244,4 +282,84 @@ def build_weekly_player_modifiers(
         elif base_effects:
             player_database_modifiers[player_id] = _format_modifiers(base_effects)
 
-    return player_database_modifiers, roster_modifier_maps
+    all_player_ids.update(league_effect_icons)
+    for player_map in roster_effect_icons.values():
+        all_player_ids.update(player_map)
+    player_database_icons = {
+        player_id: " ".join(
+            dict.fromkeys(
+                league_effect_icons.get(player_id, [])
+                + [
+                    icon
+                    for player_map in roster_effect_icons.values()
+                    for icon in player_map.get(player_id, [])
+                ]
+            )
+        )
+        for player_id in all_player_ids
+    }
+    roster_icon_maps = {
+        roster_id: {
+            player_id: " ".join(
+                dict.fromkeys(
+                    league_effect_icons.get(player_id, [])
+                    + roster_effect_icons.get(roster_id, {}).get(player_id, [])
+                )
+            )
+            for player_id in set(roster_players.get(roster_id, []))
+            | set(roster_effect_icons.get(roster_id, {}))
+        }
+        for roster_id in set(roster_players) | set(roster_effect_icons)
+    }
+
+    return (
+        player_database_modifiers,
+        roster_modifier_maps,
+        player_database_icons,
+        roster_icon_maps,
+    )
+
+
+def build_weekly_nfl_team_effects(
+    weekly_plays: list[dict],
+) -> list[dict[str, str]]:
+    """Summarize item effects that apply to entire NFL teams."""
+    effects_by_team: dict[str, set[str]] = {}
+    for play in weekly_plays:
+        item_id = str(play.get("item_id") or "").upper()
+        if item_id in {"NFL_TEAM_BYE", "NFL_DIVISION_BYE"}:
+            effect = "Bye"
+        elif item_id in {
+            "NFL_TEAM_SUPERCHARGE",
+            "NFL_DIVISION_SUPERCHARGE",
+        }:
+            effect = "Supercharged"
+        else:
+            continue
+
+        selection = _selection_for_play(play)
+        team_codes = {
+            str(team_code)
+            for team_code in selection.get("teams") or []
+        }
+        if selection.get("team"):
+            team_codes.add(str(selection["team"]))
+        division = selection.get("division")
+        if division:
+            team_codes.update(NFL_DIVISION_TEAMS.get(division, ()))
+
+        for team_code in team_codes:
+            if team_code not in NFL_TEAM_NAMES:
+                continue
+            effects_by_team.setdefault(team_code, set()).add(effect)
+
+    return [
+        {
+            "NFL Team": NFL_TEAM_NAMES[team_code],
+            "Effect": " · ".join(sorted(effects)),
+        }
+        for team_code, effects in sorted(
+            effects_by_team.items(),
+            key=lambda item: NFL_TEAM_NAMES[item[0]],
+        )
+    ]
