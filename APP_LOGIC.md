@@ -109,13 +109,12 @@ These maps are used to display the team name and profile picture next to race st
 
 ## 7. Main UI layout
 
-The app creates five tabs:
+The app creates four tabs:
 
 1. Weekly Standings
 2. Overall GP Standings
-3. Item Inventory & Play Portal
-4. Players Database
-5. Commissioner
+3. Strategize
+4. Commissioner
 
 This is the main dashboard structure.
 
@@ -155,53 +154,48 @@ The flow is:
 
 This is how the app tracks long-term championship standings.
 
-## 10. Tab 3: Item inventory and action portal
+## 10. Tab 3: Strategize
 
-This is the most game-like part of the app.
+Strategize shows the manager's roster followed by the NFL player database. The
+database supports name, team, position, and rookie filters.
 
-The code checks the current weekday and then determines whether to generate weekly item drops. If the user is authenticated:
+The sidebar contains the item selection controls. Managers can test a selection
+to preview its existing player modifier labels on the roster and player database;
+testing does not write to Supabase or change scores. Locking in a selection
+persists it in `weekly_plays` and marks the inventory item as used.
 
-- it fetches the roster’s inventory from `team_inventory`
-- it looks up the item details (name, description, target type)
-- it decides how the item should be played based on the item’s target type
+The bottom of the sidebar has a “Use test timing setting” toggle, off by default.
+When off, timing messages, item-detail visibility, drop week, and drop eligibility
+use the live NFL week and Los Angeles local day. When on, the test week/day
+selectors override those values; simulating Tuesday or later can generate and
+persist drops for the simulated week. With test timing enabled, lock-in is
+available on simulated Tuesday and Wednesday even when they differ from live
+timing; the selection is saved for the simulated week. In live mode, lock-in is
+available Tuesday and Wednesday only. The deadline is Thursday 12:00 AM (the
+start of Thursday); Thursday no longer counts forward to the next week's
+deadline. Manager item details are revealed on Thursday for the active week.
 
-League-wide event rows in the `League-wide` item-rules sheet are occurrence odds, not simultaneous events. When a league is initialized, the app rolls at most one event per week using those odds and stores the selected event; unused probability means no event that week. The database enforces one league event per week, and `supabase_migrate_single_event_per_week.sql` resolves any existing duplicate event rows.
+After that deadline, the app checks all inventory items for the active league
+and item week. Any unused item without a saved play is assigned a random valid
+selection using the same item-specific eligibility rules as the manual form,
+then saved as a weekly play and marked used. Items with no eligible target stay
+unused, and the app reports the reason instead of recording an invalid play.
+This sweep is idempotent: existing plays are not duplicated, and inventory
+items with an existing play are marked used if necessary.
 
-### Supported target types
+For a week's item odds, the app calculates cumulative GP standings through the
+previous week and uses each roster's overall GP rank. A week's existing inventory
+is never rerolled, even if the timing test or standings later change. Week 1 has
+no item drops.
 
-The app supports different kinds of item targeting:
+League-wide event rows in the `League-wide` item-rules sheet are occurrence odds,
+not simultaneous events. When a league is initialized, the app rolls at most one
+event per week using those odds and stores the selected event; unused probability
+means no event that week. The database enforces one league event per week, and
+`supabase_migrate_single_event_per_week.sql` resolves any existing duplicate
+event rows.
 
-- `ROSTER_PLAYER`: select one of the user’s own rostered players
-- `OPPONENT`: target another manager
-- `NFL_TEAM`: target an NFL team
-- `FREE_TEXT`: custom text input for a player or target name
-
-When the user submits a selection, the app inserts a record into `weekly_plays` and marks the item as used in `team_inventory`.
-
-This makes the item system function as a weekly fantasy-game mechanic layered on top of the league standings.
-
-## 11. Tab 4: Player database
-
-This tab loads a pruned player database from `data/pruned_players.json`.
-
-The app:
-
-- reads the JSON file,
-- formats player data into a DataFrame,
-- calculates rookie status,
-- sorts by team and depth chart order,
-- adds filter controls for:
-  - name,
-  - team,
-  - position,
-  - rookie status,
-  - current status
-
-It then styles players with a greyed-out appearance if they are on IR and displays the final table as a Streamlit dataframe.
-
-This is a read-only roster/player inspection tool.
-
-## 12. Tab 5: Commissioner tools
+## 11. Tab 4: Commissioner tools
 
 This tab is a placeholder UI for future commissioner functionality. It currently only shows a message indicating that admin features are pending specification.
 

@@ -48,3 +48,61 @@ def calculate_modified_scores(matchups, weekly_plays, players_data):
         })
         
     return modified_matchups
+
+
+def calculate_gp_standings(
+    weekly_matchups: dict[int, list[dict]],
+    weekly_plays: list[dict],
+    players_data: dict,
+    roster_ids: list[int],
+) -> list[dict]:
+    """Rank rosters by cumulative GP points, then cumulative modified score."""
+    season_totals = {roster_id: 0 for roster_id in roster_ids}
+    season_scores = {roster_id: 0.0 for roster_id in roster_ids}
+
+    for week, matchups in weekly_matchups.items():
+        if not matchups:
+            continue
+        week_plays = [play for play in weekly_plays if play.get("week") == week]
+        calculated_matchups = calculate_modified_scores(
+            matchups,
+            week_plays,
+            players_data,
+        )
+        week_standings = sorted(
+            calculated_matchups,
+            key=lambda team: (
+                team.get("modified_score", 0.0),
+                team.get("raw_score", 0.0),
+            ),
+            reverse=True,
+        )
+
+        for rank, team in enumerate(week_standings, start=1):
+            roster_id = team.get("roster_id")
+            if roster_id is None:
+                continue
+            season_totals[roster_id] = (
+                season_totals.get(roster_id, 0)
+                + GP_POINTS_MAP.get(rank, 0)
+            )
+            season_scores[roster_id] = (
+                season_scores.get(roster_id, 0.0)
+                + team.get("modified_score", 0.0)
+            )
+
+    return [
+        {
+            "roster_id": roster_id,
+            "gp_points": gp_points,
+            "modified_score": season_scores.get(roster_id, 0.0),
+        }
+        for roster_id, gp_points in sorted(
+            season_totals.items(),
+            key=lambda item: (
+                item[1],
+                season_scores.get(item[0], 0.0),
+            ),
+            reverse=True,
+        )
+    ]

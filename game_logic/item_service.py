@@ -50,6 +50,9 @@ def generate_weekly_drops(
     if existing_drops.data:
         return True, "Drops already generated for this week."
 
+    if not standings_ranks:
+        return False, "No previous GP standings are available for item drops."
+
     items = supabase.table("items").select("*").execute().data or []
     new_drops = []
     for roster_id, rank in standings_ranks.items():

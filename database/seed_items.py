@@ -1,6 +1,7 @@
 import pandas as pd
 from supabase import create_client
 from pathlib import Path
+from game_logic.item_inputs import ITEM_INPUTS
 
 # Initialize Supabase Client
 import streamlit as st
@@ -24,27 +25,15 @@ for _, row in df_items.iterrows():
         for rank in range(1, 13)
     }
     
-    # Map item to target requirements
     name = str(row["Item"]).strip()
-    target_type = "SELF"
-    if name in ["Shell", "Triple Shell", "Master Ball"]:
-        target_type = "OPPONENT"
-    elif name in ["NFL Team Bye", "NFL Team Supercharge"]:
-        target_type = "NFL_TEAM"
-    elif name in ["NFL Division Bye", "NFL Division Supercharge"]:
-        target_type = "NFL_DIVISION"
-    elif name in ["Snow Game/Dome Game"]:
-        target_type = "CHOICE_POSITION"
-    elif name in ["Recall", "Mushroom", "Superstar", "Bullet Bill"]:
-        target_type = "ROSTER_PLAYER"
-    elif name in ["Hyperflex", "Ultraflex", "Smash Ball"]:
-        target_type = "FREE_TEXT"
+    item_id = name.upper().replace(" ", "_").replace("/", "_")
+    input_spec = ITEM_INPUTS[item_id]
 
     items_to_insert.append({
-        "id": name.upper().replace(" ", "_").replace("/", "_"),
+        "id": item_id,
         "name": name,
         "description": str(row["Description"]).strip(),
-        "target_type": target_type,
+        "target_type": input_spec["mode"],
         "odds": odds
     })
 
