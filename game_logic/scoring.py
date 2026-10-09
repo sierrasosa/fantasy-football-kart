@@ -3,6 +3,7 @@
 import json
 
 from game_logic.item_inputs import NFL_DIVISION_TEAMS
+from game_logic.player_scores import normalize_player_name, player_score_key
 
 GP_POINTS_MAP = {
     1: 15,
@@ -47,7 +48,7 @@ def _player_points(matchup: dict, player_id: str) -> float | None:
         if str(candidate_id) != str(player_id):
             continue
         try:
-            return float(score or 0.0)
+            return None if score is None else float(score)
         except (TypeError, ValueError):
             return None
     return None
@@ -71,6 +72,159 @@ def _league_player_points(matchups: list[dict]) -> dict[str, float]:
     return player_points
 
 
+def _player_name(player_id: str, players_data: dict) -> str:
+    player = players_data.get(player_id, {})
+    return (
+        str(player.get("full_name") or "").strip()
+        or f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+    )
+
+
+def _resolve_player_id(
+    player_id: object | None,
+    player_name: str | None,
+    players_data: dict,
+) -> str | None:
+    if player_id is not None and str(player_id).strip():
+        return str(player_id).strip()
+    normalized_name = normalize_player_name(player_name or "")
+    if not normalized_name:
+        return None
+    matches = [
+        str(candidate_id)
+        for candidate_id, player in players_data.items()
+        if normalized_name
+        in {
+            normalize_player_name(str(player.get("full_name") or "")),
+            normalize_player_name(
+                f"{player.get('first_name', '')} {player.get('last_name', '')}"
+            ),
+        }
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _score_from_sources(
+    player_id: str | None,
+    player_name: str | None,
+    matchup_points: dict | None,
+    league_player_points: dict[str, float],
+    fallback_player_points: dict[str, float],
+) -> float | None:
+    if player_id:
+        score = _player_points(matchup_points or {}, player_id)
+        if score is None:
+            score = league_player_points.get(player_id)
+        if score is not None:
+            return score
+
+    if player_id:
+        score = fallback_player_points.get(player_score_key(player_id))
+        if score is not None:
+            return score
+    if player_name:
+        score_key = player_score_key(player_name=player_name)
+        return fallback_player_points.get(score_key)
+    return None
+
+
+def get_missing_item_player_score_targets(
+    weekly_plays: list[dict],
+    current_week_matchups: list[dict],
+    previous_week_matchups: list[dict],
+    players_data: dict,
+    current_week: int,
+    fallback_player_points_by_week: dict[int, dict[str, float]],
+) -> list[dict]:
+    """Find item-selected players still missing a raw score for their scoring week."""
+    live_points_by_week = {
+        current_week: _league_player_points(current_week_matchups),
+    }
+    if current_week > 1:
+        live_points_by_week[current_week - 1] = _league_player_points(
+            previous_week_matchups
+        )
+
+    targets = []
+    item_ids_with_player_scores = {
+        "MUSHROOM",
+        "SUPERSTAR",
+        "BULLET_BILL",
+        "HYPERFLEX",
+        "ULTRAFLEX",
+        "RECALL",
+    }
+
+    for play in weekly_plays:
+        item_id = str(play.get("item_id") or "").upper()
+        selection = _selection_for_play(play)
+        scoring_week = current_week - 1 if item_id == "RECALL" else current_week
+        if scoring_week < 1:
+            continue
+
+        selected_players = []
+        if item_id == "SMASH_BALL":
+            selected_players = [
+                (
+                    slot.get("player_id"),
+                    None,
+                    str(slot.get("slot") or "Dream lineup"),
+                )
+                for slot in selection.get("lineup") or []
+                if isinstance(slot, dict) and slot.get("player_id")
+            ]
+        elif item_id in item_ids_with_player_scores:
+            selected_players = [(
+                selection.get("player_id") or play.get("target_player_id"),
+                selection.get("player_name"),
+                item_id.replace("_", " ").title(),
+            )]
+
+        for selected_id, selected_name, item_label in selected_players:
+            resolved_id = _resolve_player_id(
+                selected_id,
+                str(selected_name) if selected_name else None,
+                players_data,
+            )
+            player_name = (
+                str(selected_name).strip()
+                if selected_name
+                else _player_name(resolved_id, players_data)
+                if resolved_id
+                else ""
+            )
+            if not resolved_id and not player_name:
+                continue
+            key = player_score_key(resolved_id, player_name)
+            fallback_points = fallback_player_points_by_week.get(
+                scoring_week, {}
+            )
+            has_live_score = bool(
+                resolved_id
+                and resolved_id
+                in live_points_by_week.get(scoring_week, {})
+            )
+            has_saved_score = (
+                key in fallback_points
+                or (
+                    bool(player_name)
+                    and player_score_key(player_name=player_name)
+                    in fallback_points
+                )
+            )
+            if has_live_score or has_saved_score:
+                continue
+            targets.append({
+                "player_id": resolved_id,
+                "player_name": player_name or f"Player {resolved_id}",
+                "player_key": key,
+                "scoring_week": scoring_week,
+                "item_label": item_label,
+            })
+
+    return targets
+
+
 def _score_or_zero(score: float | None) -> float:
     return score if score is not None else 0.0
 
@@ -90,6 +244,9 @@ def calculate_modified_scores(
     weekly_plays,
     players_data,
     previous_week_matchups=None,
+    fallback_player_points=None,
+    previous_week_fallback_player_points=None,
+    weekly_events=None,
 ):
     """Apply implemented player-score effects and return one result per roster.
 
@@ -104,7 +261,26 @@ def calculate_modified_scores(
     bullet_targets: dict[str, str] = {}
     recall_targets: dict[str, str] = {}
     recall_points: dict[str, dict[str, float]] = {}
+    extra_player_names: dict[str, set[str]] = {}
     pending_effects: dict[str, list[str]] = {}
+    fallback_player_points = fallback_player_points or {}
+    previous_week_fallback_player_points = (
+        previous_week_fallback_player_points or {}
+    )
+    for event in weekly_events or []:
+        if (
+            str(event.get("event_name") or "").strip().casefold()
+            != "rookie of the week"
+        ):
+            continue
+        for player_id, player in players_data.items():
+            try:
+                is_rookie = float(player.get("years_exp")) == 0
+            except (TypeError, ValueError):
+                is_rookie = False
+            if is_rookie:
+                global_factors.setdefault(str(player_id), []).append(2.0)
+
     roster_players = {
         str(matchup.get("roster_id")): [
             str(player_id) for player_id in matchup.get("players") or []
@@ -114,6 +290,9 @@ def calculate_modified_scores(
     }
     league_player_points = _league_player_points(matchups)
     previous_week_points = _league_player_points(previous_week_matchups or [])
+    for player_key, score in previous_week_fallback_player_points.items():
+        if player_key.startswith("id:"):
+            previous_week_points.setdefault(player_key.removeprefix("id:"), score)
 
     def add_local_factor(roster_id: str, player_id: str, factor: float) -> None:
         local_factors.setdefault(roster_id, {}).setdefault(
@@ -167,25 +346,21 @@ def calculate_modified_scores(
             elif item_id == "ULTRAFLEX":
                 player_name = str(
                     selection.get("player_name") or ""
-                ).strip().casefold()
-                matching_ids = [
-                    str(candidate_id)
-                    for candidate_id, player in players_data.items()
-                    if player_name
-                    and player_name in {
-                        str(player.get("full_name") or "").casefold(),
-                        (
-                            f"{player.get('first_name', '')} "
-                            f"{player.get('last_name', '')}"
-                        ).strip().casefold(),
-                    }
-                ]
-                if len(matching_ids) == 1:
-                    extra_players.setdefault(roster_id, set()).update(matching_ids)
+                ).strip()
+                matching_id = _resolve_player_id(
+                    None,
+                    player_name,
+                    players_data,
+                )
+                if matching_id:
+                    extra_players.setdefault(roster_id, set()).add(matching_id)
+                elif normalize_player_name(player_name):
+                    extra_player_names.setdefault(roster_id, set()).add(
+                        player_name
+                    )
                 else:
                     pending_effects.setdefault(roster_id, []).append(
-                        "Ultraflex: selected player could not be matched to one "
-                        "player in the NFL database"
+                        "Ultraflex: no player was selected"
                     )
         elif item_id == "GOLDEN_MUSHROOM":
             extra_players.setdefault(roster_id, set()).add("*BENCH*")
@@ -229,6 +404,14 @@ def calculate_modified_scores(
             else:
                 recalled_score = previous_week_points.get(recall_player_id)
                 if recalled_score is None:
+                    recalled_score = _score_from_sources(
+                        recall_player_id,
+                        _player_name(recall_player_id, players_data),
+                        None,
+                        {},
+                        previous_week_fallback_player_points,
+                    )
+                if recalled_score is None:
                     pending_effects.setdefault(roster_key, []).append(
                         "Recall: previous-week points are unavailable for the "
                         "selected player"
@@ -247,6 +430,7 @@ def calculate_modified_scores(
         def adjusted_points(
             player_id: str,
             ignore_bye: bool = False,
+            player_name: str | None = None,
         ) -> float | None:
             if not ignore_bye and player_id in global_byes:
                 return 0.0
@@ -257,12 +441,16 @@ def calculate_modified_scores(
             factor = 1.0
             for value in factors:
                 factor *= value
-            score = recall_points.get(roster_key, {}).get(
-                player_id,
-                _player_points(team, player_id),
-            )
+            score = recall_points.get(roster_key, {}).get(player_id)
             if score is None:
-                score = league_player_points.get(player_id)
+                score = _score_from_sources(
+                    player_id or None,
+                    player_name
+                    or (_player_name(player_id, players_data) if player_id else None),
+                    team,
+                    league_player_points,
+                    fallback_player_points,
+                )
             if score is None:
                 return None
             return score * factor
@@ -274,7 +462,11 @@ def calculate_modified_scores(
         }
         if roster_key in dream_lineups:
             lineup_points = [
-                adjusted_points(player_id, ignore_bye=True)
+                adjusted_points(
+                    player_id,
+                    ignore_bye=True,
+                    player_name=_player_name(player_id, players_data),
+                )
                 for player_id in dream_lineups[roster_key]
             ]
             if any(score is None for score in lineup_points):
@@ -309,14 +501,7 @@ def calculate_modified_scores(
                 )
             else:
                 modified_score = player_score * 10
-                player_scores = {
-                    roster_player_id: (
-                        modified_score
-                        if roster_player_id == player_id
-                        else 0.0
-                    )
-                    for roster_player_id in players
-                }
+                player_scores = {player_id: player_score}
                 effects.append(
                     "Bullet Bill: selected player score counts 10 times"
                 )
@@ -325,14 +510,13 @@ def calculate_modified_scores(
             adjusted_starting_points = 0.0
             missing_starters = []
             for player_id in starters:
-                base_points = _player_points(team, player_id)
-                if base_points is None:
-                    base_points = league_player_points.get(player_id)
-                if (
-                    player_id == recall_player_id
-                    and player_id in recall_points.get(roster_key, {})
-                ):
-                    base_points = _player_points(team, player_id)
+                base_points = _score_from_sources(
+                    player_id,
+                    _player_name(player_id, players_data),
+                    team,
+                    league_player_points,
+                    fallback_player_points,
+                )
                 changed_points = adjusted_points(player_id)
                 if base_points is None or changed_points is None:
                     has_modifier = (
@@ -354,16 +538,27 @@ def calculate_modified_scores(
                 player_id: adjusted_points(player_id)
                 for player_id in roster_extras
             }
+            player_scores.update(extra_player_points)
+            name_extra_points = {
+                player_name: adjusted_points("", player_name=player_name)
+                for player_name in extra_player_names.get(roster_key, set())
+            }
             added_points = sum(
                 _score_or_zero(score)
-                for score in extra_player_points.values()
+                for score in (
+                    list(extra_player_points.values())
+                    + list(name_extra_points.values())
+                )
             )
             modified_score += added_points
             if added_points:
                 effects.append(f"Extra players: +{added_points:.2f} pts")
             missing_extra_players = [
-                player_id
-                for player_id, score in extra_player_points.items()
+                player_label
+                for player_label, score in (
+                    list(extra_player_points.items())
+                    + list(name_extra_points.items())
+                )
                 if score is None
             ]
             if missing_extra_players:
@@ -402,6 +597,8 @@ def calculate_gp_standings(
     weekly_plays: list[dict],
     players_data: dict,
     roster_ids: list[int],
+    fallback_player_points_by_week: dict[int, dict[str, float]] | None = None,
+    weekly_events_by_week: dict[int, list[dict]] | None = None,
 ) -> list[dict]:
     """Rank rosters by cumulative GP points, then cumulative modified score."""
     season_totals = {roster_id: 0 for roster_id in roster_ids}
@@ -416,6 +613,9 @@ def calculate_gp_standings(
             week_plays,
             players_data,
             weekly_matchups.get(week - 1, []),
+            (fallback_player_points_by_week or {}).get(week, {}),
+            (fallback_player_points_by_week or {}).get(week - 1, {}),
+            (weekly_events_by_week or {}).get(week, []),
         )
         week_standings = sorted(
             calculated_matchups,

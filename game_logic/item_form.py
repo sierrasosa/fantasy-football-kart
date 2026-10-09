@@ -11,6 +11,7 @@ from game_logic.item_inputs import (
     NFL_DIVISION_TEAMS,
     NFL_TEAM_NAMES,
     NON_STARTER_SLOTS,
+    format_nfl_division,
 )
 from helpers import sleeper_api
 
@@ -341,7 +342,11 @@ def describe_item_selection(
         return [f"Team: {NFL_TEAM_NAMES.get(team, team)}"] if team else []
     if mode == "nfl_division":
         division = selection.get("division")
-        return [f"Division: {division}"] if division else []
+        return (
+            [f"Division: {format_nfl_division(division)}"]
+            if division
+            else []
+        )
     if mode == "position_choice":
         choice = selection.get("choice")
         return [f"Choice: {choice}"] if choice else []
@@ -530,6 +535,7 @@ def render_item_selection_form(
                 "Select an NFL division",
                 list(NFL_DIVISION_TEAMS),
                 index=None,
+                format_func=format_nfl_division,
                 key=f"{form_key}_division",
             )
             if selected_division:

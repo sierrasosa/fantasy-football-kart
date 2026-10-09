@@ -34,7 +34,10 @@ def select_weekly_events(template_events: list[dict]) -> list[dict]:
 
 def get_user_rosters(supabase_client, user_id: str, include_pin_hash: bool = False) -> list[dict]:
     """Load initialized league roster rows for a Sleeper user."""
-    columns = "roster_id, league_id, league_name, user_id, user_name, team_name"
+    columns = (
+        "roster_id, league_id, league_name, user_id, user_name, "
+        "team_name, commissioner"
+    )
     if include_pin_hash:
         columns += ", pin_hash"
     rows = (

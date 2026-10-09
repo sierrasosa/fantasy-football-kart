@@ -214,7 +214,6 @@ def build_weekly_player_modifiers(
             target_player_id = (selection.get("target") or {}).get("player_id")
             if target_player_id:
                 add_league_effect(str(target_player_id), "2x", 2.0)
-                add_league_effect(str(target_player_id), "SHELL IMMUNE")
         elif item_id == "SMASH_BALL":
             lineup_ids = {
                 str(slot.get("player_id"))

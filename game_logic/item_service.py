@@ -9,6 +9,15 @@ ITEM_BLOCKING_EVENT_NAMES = {
 }
 
 
+def ensure_coin_faab_amount(custom_target: dict) -> dict:
+    """Return a custom target with a stable, valid Coin FAAB amount."""
+    target = dict(custom_target)
+    amount = target.get("coin_faab_amount")
+    if not isinstance(amount, int) or not 5 <= amount <= 15:
+        target["coin_faab_amount"] = random.randint(5, 15)
+    return target
+
+
 def get_item_unavailable_reason(week: int, events: list[dict]) -> str | None:
     """Return why item drops are unavailable, if this week blocks them."""
     if week == 1:

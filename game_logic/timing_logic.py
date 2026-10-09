@@ -134,6 +134,50 @@ def build_weekly_timing_context(
     }
 
 
+def get_revealed_item_plays(
+    weekly_plays: list[dict],
+    timing_context: dict[str, Any],
+) -> list[dict]:
+    """Return revealed plays, allowing only one NFL Division Bye per week."""
+    active_week = int(timing_context["week"])
+    active_weekday = int(timing_context["weekday"])
+    revealed = [
+        (index, play)
+        for index, play in enumerate(weekly_plays)
+        if int(play.get("week") or 0) < active_week
+        or (
+            int(play.get("week") or 0) == active_week
+            and active_weekday >= 3
+        )
+    ]
+    revealed.sort(
+        key=lambda entry: (
+            int(entry[1].get("week") or 0),
+            str(entry[1].get("created_at") or ""),
+            entry[0],
+        )
+    )
+
+    division_bye_weeks = set()
+    effective_indices = set()
+    for index, play in revealed:
+        week = int(play.get("week") or 0)
+        if (
+            str(play.get("item_id") or "").upper() == "NFL_DIVISION_BYE"
+            and week in division_bye_weeks
+        ):
+            continue
+        if str(play.get("item_id") or "").upper() == "NFL_DIVISION_BYE":
+            division_bye_weeks.add(week)
+        effective_indices.add(index)
+
+    return [
+        play
+        for index, play in enumerate(weekly_plays)
+        if index in effective_indices
+    ]
+
+
 def resolve_weekly_timing_context(
     live_context: Dict[str, Any],
     selected_week: int,

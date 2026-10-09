@@ -11,9 +11,11 @@ from game_logic.modifier_logic import (
     build_weekly_player_modifiers,
 )
 from game_logic.timing_logic import (
+    get_revealed_item_plays,
     get_current_nfl_context,
     resolve_weekly_timing_context,
 )
+from game_logic.item_inputs import NFL_TEAM_NAMES, format_nfl_division
 import streamlit as st
 import extra_streamlit_components as stx
 import pandas as pd
@@ -38,6 +40,12 @@ from database.league_service import (
     find_commissioner_leagues,
     initialize_commissioner_league,
 )
+from database.player_score_service import (
+    load_player_score_inputs,
+    save_player_score_input,
+    scores_by_week,
+)
+from game_logic.player_scores import normalize_player_name
 
 # -----------------------------------------------------------------------------
 # 1. Page Configuration & Supabase Initialization
@@ -65,14 +73,45 @@ def get_cookie_manager():
 
 cookie_manager = get_cookie_manager()
 AUTH_COOKIE_NAME = "ffkart_auth_v1"
+ITEM_IMAGE_FILES = {
+    "SHELL": "green_shell.png",
+    "TRIPLE_SHELL": "triple_green_shell.png",
+    "COIN": "coin.png",
+    "MUSHROOM": "mushroom.png",
+    "NFL_TEAM_BYE": "bye.png",
+    "NFL_DIVISION_BYE": "bye.png",
+    "NFL_TEAM_SUPERCHARGE": "supercharge.png",
+    "NFL_DIVISION_SUPERCHARGE": "supercharge.png",
+    "SNOW_GAME_DOME_GAME": "dome.png",
+    "HYPERFLEX": "flex.png",
+    "ULTRAFLEX": "flex.png",
+    "RECALL": "recall.png",
+    "GOLDEN_MUSHROOM": "golden_mushroom.png",
+    "SUPERSTAR": "superstar.png",
+    "BULLET_BILL": "bullet_bill.png",
+    "SMASH_BALL": "smash_ball.png",
+    "MASTER_BALL": "masterball.png",
+}
 INJURY_STATUS_ICONS = {
     "ACTIVE": "✅",
     "QUESTIONABLE": "❓",
     "DOUBTFUL": "⚠️",
     "OUT": "❌",
     "IR": "🏥",
+    "PUP": "🩼",
+    "SUS": "🟥",
     "INACTIVE": "⛔",
 }
+
+
+def get_item_image_path(item_id: object) -> Path:
+    """Return item-specific artwork, falling back to the generic item box."""
+    image_file = ITEM_IMAGE_FILES.get(str(item_id or "").upper())
+    if image_file:
+        image_path = PROJECT_ROOT / "assets" / image_file
+        if image_path.is_file():
+            return image_path
+    return PROJECT_ROOT / "assets" / "item_box.png"
 
 
 def format_injury_status(status: object) -> str:
@@ -88,6 +127,8 @@ def make_roster_dataframe(
     modified_points_by_player: dict[str, float | None] | None = None,
     starter_slots_by_player: dict[str, str] | None = None,
     effect_icons_by_player: dict[str, str] | None = None,
+    show_injury_status_column: bool = True,
+    show_inactive_status_icon: bool = False,
 ) -> pd.DataFrame:
     """Build a consistently sorted roster table with weekly points and injuries."""
     modifiers_by_player = modifiers_by_player or {}
@@ -97,15 +138,45 @@ def make_roster_dataframe(
     rows = []
     for player in roster_players:
         player_id = str(player.get("id"))
+        source_player_id = str(
+            player.get("source_player_id") or player_id
+        )
         player_name = str(player.get("name") or "Unknown")
-        effect_icons = effect_icons_by_player.get(player_id, "")
+        effect_icons = effect_icons_by_player.get(source_player_id, "")
+        injury_status = str(player.get("injury_status") or "Active").strip()
+        injury_icon = INJURY_STATUS_ICONS.get(injury_status.upper(), "")
+        name_status_icon = (
+            injury_icon
+            if show_inactive_status_icon
+            and injury_status.casefold() != "active"
+            else ""
+        )
+        player_icons = " ".join(
+            icon for icon in (name_status_icon, effect_icons) if icon
+        )
+        modifier = modifiers_by_player.get(source_player_id, "")
+        if player.get("is_bullet_bill_copy"):
+            modifier_parts = [
+                part.strip()
+                for part in modifier.split("·")
+                if part.strip() != "10x"
+            ]
+            modifier = " · ".join(modifier_parts)
+        is_active = (
+            player.get("is_starter")
+            or player.get("is_item_active")
+            or "+ACTIVE" in modifier
+        )
         modified_points = modified_points_by_player.get(
             player_id,
-            player.get("points"),
+            modified_points_by_player.get(
+                source_player_id,
+                player.get("points"),
+            ),
         )
         rows.append({
             "Player ID": player_id,
-            "Player": f"{player_name} {effect_icons}".rstrip(),
+            "Player": f"{player_name} {player_icons}".rstrip(),
             "Pos": (
                 (
                     f"🏈 {starter_slots_by_player[player_id]} · "
@@ -113,23 +184,22 @@ def make_roster_dataframe(
                     if player.get("is_starter")
                     and player_id in starter_slots_by_player
                     else (
-                        f"{'🏈' if player.get('is_starter') else '🪑'} "
+                        f"{'🏈' if is_active else '🪑'} "
                         f"{player.get('pos', 'N/A')}"
                     )
                 )
             ),
             "Team": player.get("team", "FA"),
             "Points": player.get("points"),
-            "Modifier": modifiers_by_player.get(player_id, "—"),
+            "Modifier": modifier or "—",
             "After Modifiers": (
                 round(modified_points, 2)
                 if isinstance(modified_points, (int, float))
                 else None
             ),
-            "Injury Status": format_injury_status(
-                player.get("injury_status")
-            ),
         })
+        if show_injury_status_column:
+            rows[-1]["Injury Status"] = format_injury_status(injury_status)
     roster_df = pd.DataFrame(rows)
     if not roster_df.empty:
         position_order = ["QB", "RB", "WR", "TE", "K", "DEF", "FLEX", "BN"]
@@ -174,8 +244,16 @@ def make_roster_dataframe(
                     else len(lineup_slot_order) + len(position_order)
                 )
                 sort_slot_numbers.append(0)
-            else:
+            elif player.get("is_item_active"):
                 sort_roles.append(1)
+                sort_positions.append(
+                    position_order.index(player.get("pos"))
+                    if player.get("pos") in position_order
+                    else len(position_order)
+                )
+                sort_slot_numbers.append(0)
+            else:
+                sort_roles.append(2)
                 sort_positions.append(
                     position_order.index(player.get("pos"))
                     if player.get("pos") in position_order
@@ -201,6 +279,307 @@ def make_roster_dataframe(
     return roster_df
 
 
+def include_flex_item_players(
+    roster_players: list[dict],
+    roster_plays: list[dict],
+    players_data: dict,
+    matchup_data_by_roster: dict,
+) -> list[dict]:
+    """Build the displayed roster for revealed item-added players."""
+    roster_players = list(roster_players)
+    flex_item_positions = {"HYPERFLEX": "HF", "ULTRAFLEX": "UF"}
+    matchup_player_points = {}
+    for matchup in matchup_data_by_roster.values():
+        player_points = matchup.get("players_points") or {}
+        if isinstance(player_points, dict):
+            matchup_player_points.update({
+                str(player_id): points
+                for player_id, points in player_points.items()
+            })
+
+    for play in roster_plays:
+        item_id = str(play.get("item_id") or "").upper()
+        if item_id == "BULLET_BILL":
+            selection = _commissioner_selection(play)
+            player_id = str(
+                selection.get("player_id")
+                or play.get("target_player_id")
+                or ""
+            ).strip()
+            player = players_data.get(player_id)
+            if not player:
+                player = next(
+                    (
+                        roster_player
+                        for roster_player in roster_players
+                        if str(roster_player.get("id")) == player_id
+                    ),
+                    None,
+                )
+            if not player:
+                continue
+
+            name = (
+                player.get("full_name")
+                or player.get("name")
+                or f"{player.get('first_name', '')} "
+                f"{player.get('last_name', '')}".strip()
+                or f"Player {player_id}"
+            )
+            position = (
+                player.get("position")
+                or player.get("pos")
+                or "N/A"
+            )
+            team = player.get("team") or "FA"
+            years_exp = player.get("years_exp", 0)
+            points = matchup_player_points.get(player_id)
+            if points is None:
+                points = next(
+                    (
+                        roster_player.get("points")
+                        for roster_player in roster_players
+                        if str(roster_player.get("id")) == player_id
+                    ),
+                    None,
+                )
+            return [
+                {
+                    "id": f"{player_id}:bullet-bill:{copy_number}",
+                    "source_player_id": player_id,
+                    "name": name,
+                    "pos": position,
+                    "team": team,
+                    "years_exp": years_exp,
+                    "is_starter": True,
+                    "is_bullet_bill_copy": True,
+                    "points": points,
+                    "injury_status": player.get("injury_status") or "Active",
+                }
+                for copy_number in range(1, 11)
+            ]
+
+        if item_id not in {"MUSHROOM", "HYPERFLEX", "ULTRAFLEX"}:
+            continue
+
+        selection = _commissioner_selection(play)
+        player_id = str(
+            selection.get("player_id") or play.get("target_player_id") or ""
+        ).strip()
+        player_name = str(selection.get("player_name") or "").strip()
+        if not player_id and item_id == "ULTRAFLEX" and player_name:
+            normalized_name = normalize_player_name(player_name)
+            matches = [
+                str(candidate_id)
+                for candidate_id, player in players_data.items()
+                if normalized_name
+                in {
+                    normalize_player_name(str(player.get("full_name") or "")),
+                    normalize_player_name(
+                        f"{player.get('first_name', '')} "
+                        f"{player.get('last_name', '')}"
+                    ),
+                }
+            ]
+            if len(matches) == 1:
+                player_id = matches[0]
+
+        if not player_id:
+            continue
+
+        existing_player = next(
+            (
+                roster_player
+                for roster_player in roster_players
+                if str(roster_player.get("id")) == player_id
+            ),
+            None,
+        )
+        if existing_player:
+            existing_player["is_item_active"] = True
+            continue
+
+        player = players_data.get(player_id)
+        if not player:
+            continue
+        name = (
+            player.get("full_name")
+            or f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            or player_name
+            or f"Player {player_id}"
+        )
+        position = str(
+            player.get("position") or player.get("pos") or ""
+        ).strip()
+        if not position or position.upper() == "N/A":
+            position = flex_item_positions.get(item_id, "N/A")
+        roster_players.append({
+            "id": player_id,
+            "name": name,
+            "pos": position,
+            "team": player.get("team") or "FA",
+            "years_exp": player.get("years_exp", 0),
+            "is_starter": False,
+            "is_item_active": True,
+            "points": matchup_player_points.get(player_id),
+            "injury_status": player.get("injury_status") or "Active",
+        })
+
+    return roster_players
+
+
+def _commissioner_selection(play: dict) -> dict:
+    selection = play.get("selection")
+    if isinstance(selection, str):
+        try:
+            selection = json.loads(selection)
+        except json.JSONDecodeError:
+            selection = {}
+    if isinstance(selection, dict) and selection:
+        return selection
+
+    custom_target = play.get("custom_target")
+    if isinstance(custom_target, str) and custom_target.lstrip().startswith("{"):
+        try:
+            selection = json.loads(custom_target)
+        except json.JSONDecodeError:
+            return {}
+        return selection if isinstance(selection, dict) else {}
+    return {}
+
+
+def _commissioner_item_summary(
+    team_name: str,
+    item_name: str,
+    play: dict,
+    roster_map: dict,
+    players_data: dict,
+    item_description: str = "",
+) -> str:
+    item_id = str(play.get("item_id") or "").upper()
+    selection = _commissioner_selection(play)
+
+    def selected_player_name(player_id: object) -> str:
+        player = players_data.get(str(player_id), {})
+        return (
+            player.get("full_name")
+            or f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+            or f"Player {player_id}"
+        )
+
+    if item_id == "COIN":
+        detail = item_description.strip() or "They get their FAAB bonus this week."
+        return f"{team_name} got {item_name}! {detail}"
+    if item_id == "MUSHROOM":
+        player_id = selection.get("player_id") or play.get("target_player_id")
+        detail = (
+            f"They are adding {selected_player_name(player_id)} from their "
+            "bench this week."
+            if player_id
+            else "They are adding a player from their bench this week."
+        )
+    elif item_id == "GOLDEN_MUSHROOM":
+        detail = "They are adding their bench players this week."
+    elif item_id in {"NFL_TEAM_BYE", "NFL_TEAM_SUPERCHARGE"}:
+        team_code = selection.get("team") or play.get("target_nfl_team")
+        nfl_team = NFL_TEAM_NAMES.get(str(team_code), str(team_code or "the selected team"))
+        verb = "are on bye" if item_id == "NFL_TEAM_BYE" else "are supercharged"
+        detail = f"The {nfl_team} {verb} this week!"
+    elif item_id in {"NFL_DIVISION_BYE", "NFL_DIVISION_SUPERCHARGE"}:
+        division = format_nfl_division(
+            selection.get("division") or "selected division"
+        )
+        verb = "are on bye" if item_id == "NFL_DIVISION_BYE" else "are supercharged"
+        detail = f"The teams in the {division} {verb} this week!"
+    elif item_id == "SNOW_GAME_DOME_GAME":
+        choice = selection.get("choice")
+        if not choice:
+            position = str(selection.get("position") or "").upper()
+            choice = {"WR": "Snow Game", "RB": "Dome Game"}.get(position, "selected effect")
+        detail = f"They chose {choice} this week."
+    elif item_id == "RECALL":
+        player_id = selection.get("player_id") or play.get("target_player_id")
+        detail = (
+            f"They are replaying {selected_player_name(player_id)}'s score "
+            "from last week."
+            if player_id
+            else "They selected a player to replay last week's score."
+        )
+    elif item_id == "HYPERFLEX":
+        player_id = selection.get("player_id") or play.get("target_player_id")
+        detail = (
+            f"They are adding {selected_player_name(player_id)} to their "
+            "lineup this week."
+            if player_id
+            else "They are adding a player to their lineup this week."
+        )
+    elif item_id == "ULTRAFLEX":
+        player_name = str(selection.get("player_name") or "").strip()
+        detail = (
+            f"They selected {player_name} for Ultraflex."
+            if player_name
+            else "Their Ultraflex selection needs review."
+        )
+    elif item_id == "SUPERSTAR":
+        player_id = selection.get("player_id") or play.get("target_player_id")
+        detail = (
+            f"{selected_player_name(player_id)} is their Superstar this week."
+            if player_id
+            else "They selected a Superstar."
+        )
+    elif item_id == "BULLET_BILL":
+        player_id = selection.get("player_id") or play.get("target_player_id")
+        detail = (
+            f"{selected_player_name(player_id)} is their Bullet Bill player "
+            "this week."
+            if player_id
+            else "They selected a Bullet Bill player."
+        )
+    elif item_id == "SMASH_BALL":
+        lineup = selection.get("lineup") or []
+        selected_players = [
+            f"{slot.get('slot')}: {selected_player_name(slot['player_id'])}"
+            for slot in lineup
+            if slot.get("player_id")
+        ]
+        detail = (
+            "Their dream lineup is " + ", ".join(selected_players) + "."
+            if selected_players
+            else "Their Smash Ball dream lineup needs review."
+        )
+    elif item_id == "MASTER_BALL":
+        selection_details = describe_item_selection(
+            selection,
+            roster_map,
+            players_data,
+        )
+        detail = (
+            "Their Master Ball trade: " + "; ".join(selection_details) + "."
+            if selection_details
+            else "Their Master Ball trade needs review."
+        )
+    elif item_id in {"SHELL", "TRIPLE_SHELL"}:
+        selection_details = describe_item_selection(
+            selection,
+            roster_map,
+            players_data,
+        )
+        detail = (
+            "They targeted " + "; ".join(selection_details) + "."
+            if selection_details
+            else "Their shell target needs review."
+        )
+    else:
+        selection_details = describe_item_selection(
+            selection,
+            roster_map,
+            players_data,
+        )
+        detail = "; ".join(selection_details) or "No selection details recorded."
+
+    return f"{team_name} got {item_name}! {detail}"
+
+
 def save_item_play(
     item_record: dict,
     selection: dict,
@@ -209,12 +588,32 @@ def save_item_play(
     roster_id: int,
 ) -> None:
     """Persist an item selection and mark the inventory item as used."""
+    selection = dict(selection)
+    item_id = str(item_record.get("item_id") or "").upper()
+    if item_id == "NFL_DIVISION_BYE":
+        existing_division_bye = (
+            supabase.table("weekly_plays")
+            .select("id")
+            .eq("league_id", league_id)
+            .eq("week", week)
+            .eq("item_id", "NFL_DIVISION_BYE")
+            .limit(1)
+            .execute()
+        )
+        if existing_division_bye.data:
+            raise ValueError(
+                f"Only one NFL Division Bye can be locked in for Week {week}."
+            )
+
+    if item_id == "COIN":
+        selection = item_service.ensure_coin_faab_amount(selection)
+
     mode = selection.get("mode")
     target = selection.get("target") or {}
     target_player_id = selection.get("player_id") or target.get("player_id")
     target_nfl_team = selection.get("team")
     custom_target = selection.get("player_name") or selection.get("choice")
-    if mode != "none":
+    if mode != "none" or item_id == "COIN":
         custom_target = json.dumps(selection)
 
     play_record = {
@@ -347,15 +746,13 @@ def auto_select_expired_item_plays(
                 f"(roster {roster_id}): {exc}"
             )
             continue
+        except ValueError as exc:
+            st.sidebar.warning(str(exc))
+            continue
 
         existing_plays.add(play_key)
         auto_selected_count += 1
 
-    if auto_selected_count:
-        st.session_state["auto_selected_item_notice"] = (
-            f"Automatically selected {auto_selected_count} item"
-            f"{'s' if auto_selected_count != 1 else ''} after the deadline."
-        )
     if auto_selected_count or inventory_repaired:
         st.rerun()
 
@@ -372,6 +769,8 @@ if "roster_id" not in st.session_state:
     st.session_state["roster_id"] = None
 if "team_name" not in st.session_state:
     st.session_state["team_name"] = None
+if "is_commissioner" not in st.session_state:
+    st.session_state["is_commissioner"] = False
 if "user_id" not in st.session_state:
     st.session_state["user_id"] = None
 if "active_league_id" not in st.session_state:
@@ -384,6 +783,8 @@ if "setup_account" not in st.session_state:
     st.session_state["setup_account"] = None
 if "setup_is_commissioner" not in st.session_state:
     st.session_state["setup_is_commissioner"] = False
+if "setup_lookup_failed" not in st.session_state:
+    st.session_state["setup_lookup_failed"] = False
 if "current_setup_season" not in st.session_state:
     st.session_state["current_setup_season"] = None
 if "loaded_setup_season" not in st.session_state:
@@ -437,6 +838,9 @@ if not st.session_state["authenticated"] and not deleting_login_cookie:
                     st.session_state["active_league_id"] = saved_session["league_id"]
                     st.session_state["roster_id"] = saved_roster["roster_id"]
                     st.session_state["team_name"] = saved_roster["team_name"]
+                    st.session_state["is_commissioner"] = bool(
+                        saved_roster.get("commissioner")
+                    )
                     st.session_state["remember_token"] = browser_token
                 else:
                     revoke_login_session(supabase, browser_token)
@@ -449,7 +853,15 @@ if not st.session_state["authenticated"] and not deleting_login_cookie:
 # -----------------------------------------------------------------------------
 # 3. Sidebar Authentication Engine
 # -----------------------------------------------------------------------------
-st.sidebar.title("🏎️ FF Kart League")
+nfl_context = get_current_nfl_context()
+current_display_week = min(
+    max(int(nfl_context["display_week"]), 1),
+    18,
+)
+st.sidebar.title("🏎️ Current Week Overview")
+sidebar_event_area = st.sidebar.empty()
+if not st.session_state["authenticated"]:
+    st.sidebar.divider()
 
 
 if not st.session_state["authenticated"]:
@@ -460,6 +872,7 @@ if not st.session_state["authenticated"]:
         st.session_state["login_error"] = None
         st.session_state["setup_account"] = None
         st.session_state["setup_is_commissioner"] = False
+        st.session_state["setup_lookup_failed"] = False
         st.session_state["login_rosters"] = []
         st.session_state["setup_leagues"] = []
         st.session_state["current_setup_season"] = None
@@ -469,6 +882,7 @@ if not st.session_state["authenticated"]:
         user_id = account.get("user_id")
         if not user_id:
             st.session_state["setup_account"] = None
+            st.session_state["setup_lookup_failed"] = False
             st.session_state["login_rosters"] = []
             st.session_state["setup_leagues"] = []
             st.session_state["current_setup_season"] = None
@@ -498,7 +912,9 @@ if not st.session_state["authenticated"]:
                         st.session_state["setup_season"] = commissioner_season
                         st.session_state["loaded_setup_season"] = commissioner_season
                         st.session_state["setup_leagues"] = commissioner_leagues
+                st.session_state["setup_lookup_failed"] = False
             except Exception as exc:
+                st.session_state["setup_lookup_failed"] = True
                 st.sidebar.error(f"Could not load Sleeper leagues or roster records: {exc}")
                 st.session_state["login_rosters"] = []
                 st.session_state["setup_leagues"] = []
@@ -528,6 +944,9 @@ if not st.session_state["authenticated"]:
                 st.session_state["user_id"] = selected_login_roster.get("user_id")
                 st.session_state["roster_id"] = selected_login_roster.get("roster_id")
                 st.session_state["team_name"] = selected_login_roster.get("team_name")
+                st.session_state["is_commissioner"] = bool(
+                    selected_login_roster.get("commissioner")
+                )
                 st.session_state["active_league_id"] = selected_login_roster.get("league_id")
                 supabase.table("login_attempts").delete().eq("user_id", login_user_id).execute()
                 if remember_browser:
@@ -558,9 +977,15 @@ if not st.session_state["authenticated"]:
     elif (
         st.session_state["setup_account"]
         and not st.session_state["setup_is_commissioner"]
+        and not st.session_state["setup_lookup_failed"]
     ):
         st.sidebar.info(
             "Please contact your commissioner to initialize the league in this app."
+        )
+    elif st.session_state["setup_lookup_failed"]:
+        st.sidebar.caption(
+            "Sleeper lookup failed. Check your connection and click "
+            "Find account to retry."
         )
     else:
         st.sidebar.caption("Enter your Sleeper username to find your leagues.")
@@ -644,44 +1069,45 @@ else:
     if not user_rosters:
         st.session_state["authenticated"] = False
         st.rerun()
-    league_options = {
+    active_league_options = {
         f"{row.get('league_name', row['league_id'])} · {row.get('team_name', 'Team')}": row
         for row in user_rosters
     }
-    current_index = next(
-        (i for i, row in enumerate(league_options.values())
-         if str(row.get("league_id")) == str(st.session_state["active_league_id"])),
-        0,
+    current_active_label = next(
+        (
+            label
+            for label, row in active_league_options.items()
+            if str(row.get("league_id"))
+            == str(st.session_state["active_league_id"])
+        ),
+        next(iter(active_league_options)),
     )
-    active_label = st.sidebar.selectbox("Active league", list(league_options), index=current_index)
-    active_roster = league_options[active_label]
+    if st.session_state.get("active_league_selection") not in active_league_options:
+        st.session_state["active_league_selection"] = current_active_label
+    active_roster = active_league_options[
+        st.session_state["active_league_selection"]
+    ]
     st.session_state["active_league_id"] = active_roster.get("league_id")
     st.session_state["roster_id"] = active_roster.get("roster_id")
     st.session_state["team_name"] = active_roster.get("team_name")
+    st.session_state["is_commissioner"] = bool(
+        active_roster.get("commissioner")
+    )
     update_login_session_league(
         supabase,
         st.session_state.get("remember_token"),
         str(active_roster.get("league_id")),
     )
-    st.sidebar.write(f"Logged in as: **{st.session_state['team_name']}**")
-    if st.sidebar.button("Log Out"):
-        remember_token = st.session_state.get("remember_token") or cookie_manager.get(AUTH_COOKIE_NAME)
-        revoke_login_session(supabase, remember_token)
-        st.session_state["pending_cookie_delete"] = True
-        st.session_state["authenticated"] = False
-        st.session_state["roster_id"] = None
-        st.session_state["team_name"] = None
-        st.session_state["user_id"] = None
-        st.session_state["active_league_id"] = None
-        st.session_state["remember_token"] = None
-        st.session_state["login_rosters"] = []
-        st.rerun()
 
 if st.session_state["new_league_pins"]:
     pin_setup = st.session_state["new_league_pins"]
     st.warning("Share these one-time manager PINs with the matching league members, then dismiss this list.")
     st.subheader(f"PINs for {pin_setup['league_name']}")
-    st.dataframe(pd.DataFrame(pin_setup["pins"]), hide_index=True, use_container_width=True)
+    st.dataframe(
+        pd.DataFrame(pin_setup["pins"]),
+        hide_index=True,
+        width="stretch",
+    )
     if st.button("I have shared/saved these PINs"):
         st.session_state["new_league_pins"] = None
         st.rerun()
@@ -691,10 +1117,17 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # Global League Week Selector
-selected_week = st.sidebar.number_input(
-    "NFL Week", min_value=1, max_value=18, value=1, step=1
+st.title("🏎️ Fantasy Football Kart")
+default_week = current_display_week
+selected_week = st.number_input(
+    "NFL Week",
+    min_value=1,
+    max_value=18,
+    value=default_week,
+    step=1,
+    key="selected_nfl_week",
 )
-nfl_context = get_current_nfl_context()
+selected_week_event_area = st.empty()
 now = nfl_context["now"]
 actual_weekday = nfl_context["weekday"]
 actual_nfl_week = nfl_context["week"]
@@ -763,6 +1196,10 @@ try:
     weekly_plays = plays_res.data or []
 except Exception:
     weekly_plays = []
+revealed_weekly_plays = get_revealed_item_plays(
+    weekly_plays,
+    timing_context,
+)
 
 try:
     inventory_res = (
@@ -779,27 +1216,50 @@ except Exception:
 try:
     events_res = (
         supabase.table("league_events")
-        .select("event_name, description")
+        .select("week, event_name, description")
         .eq("league_id", league_id)
-        .eq("week", selected_week)
+        .lte(
+            "week",
+            max(selected_week, item_week - 1, current_display_week),
+        )
         .execute()
     )
-    weekly_events = events_res.data or []
-except Exception:
+    weekly_events_by_week: dict[int, list[dict]] = {}
+    for event in events_res.data or []:
+        event_week = int(event["week"])
+        weekly_events_by_week.setdefault(event_week, []).append(event)
+    weekly_events = weekly_events_by_week.get(selected_week, [])
+    current_week_events = weekly_events_by_week.get(current_display_week, [])
+except Exception as exc:
+    weekly_events_by_week = {}
     weekly_events = []
+    current_week_events = []
+    st.error(f"Could not load league events for scoring: {exc}")
 
 try:
-    items_res = supabase.table("items").select("id, name").execute()
+    items_res = supabase.table("items").select("id, name, description").execute()
     item_names = {
         str(item.get("id")): item.get("name")
         for item in (items_res.data or [])
     }
+    item_descriptions = {
+        str(item.get("id")): item.get("description") or ""
+        for item in (items_res.data or [])
+    }
 except Exception:
     item_names = {}
+    item_descriptions = {}
 
 plays_by_roster = {}
 for play in weekly_plays:
     plays_by_roster.setdefault(str(play.get("roster_id")), []).append(play)
+
+revealed_plays_by_roster = {}
+for play in revealed_weekly_plays:
+    revealed_plays_by_roster.setdefault(
+        str(play.get("roster_id")),
+        [],
+    ).append(play)
 
 inventory_by_roster = {
     str(item.get("roster_id")): item
@@ -811,11 +1271,27 @@ previous_week_matchups = (
     if selected_week > 1
     else []
 )
+fallback_score_error = None
+try:
+    fallback_player_points_by_week = scores_by_week(
+        load_player_score_inputs(
+            supabase,
+            league_id,
+            max(selected_week, item_week - 1),
+        )
+    )
+except Exception as exc:
+    fallback_player_points_by_week = {}
+    fallback_score_error = exc
+
 calculated_matchups = scoring.calculate_modified_scores(
     raw_matchups,
-    weekly_plays,
+    revealed_weekly_plays,
     players_data,
     previous_week_matchups,
+    fallback_player_points_by_week.get(selected_week, {}),
+    fallback_player_points_by_week.get(selected_week - 1, {}),
+    weekly_events,
 ) or []
 calculated_matchups_by_roster = {
     str(team.get("roster_id")): team
@@ -823,7 +1299,7 @@ calculated_matchups_by_roster = {
 }
 
 # Build roster mapping from Supabase
-roster_map = {}
+roster_map: dict[int, str] = {}
 try:
     r_data = (
         supabase.table("rosters")
@@ -845,7 +1321,10 @@ try:
         supabase.table("weekly_plays")
         .select("*")
         .eq("league_id", league_id)
-        .lte("week", max(selected_week, item_week - 1))
+        .lte(
+            "week",
+            max(selected_week, item_week - 1, current_display_week),
+        )
         .execute()
     )
     all_plays = all_plays_res.data or []
@@ -853,6 +1332,7 @@ try:
 except Exception as exc:
     all_plays = []
     all_plays_error = exc
+revealed_all_plays = get_revealed_item_plays(all_plays, timing_context)
 
 # Build avatar map dynamically using Sleeper API
 avatar_map = {}
@@ -870,7 +1350,7 @@ try:
 except Exception as e:
     st.error(f"Error fetching avatars: {e}")
 
-modifier_plays = weekly_plays
+modifier_plays = revealed_weekly_plays
 item_preview = st.session_state.get("item_preview")
 if item_preview:
     if (
@@ -880,7 +1360,7 @@ if item_preview:
         == str(st.session_state["roster_id"])
     ):
         modifier_plays = [
-            *weekly_plays,
+            *revealed_weekly_plays,
             {
                 "item_id": item_preview["item_id"],
                 "roster_id": item_preview["roster_id"],
@@ -907,41 +1387,58 @@ if item_preview:
 # -----------------------------------------------------------------------------
 # 5. Main UI Tabs
 # -----------------------------------------------------------------------------
-st.title("🏎️ Fantasy Football Kart")
-for weekly_event in weekly_events:
-    st.info(
-        f"📢 **Week {selected_week} Global Event: "
-        f"{weekly_event.get('event_name', 'League Event')}**\n\n"
-        f"{weekly_event.get('description', '')}"
-    )
-
 show_weekly_item_details = timing_context["show_weekly_item_details"]
-st.header(timing_context["announcement"])
+nfl_team_effect_rows = build_weekly_nfl_team_effects(
+    [
+        play
+        for play in revealed_all_plays
+        if int(play.get("week") or 0) == current_display_week
+    ]
+)
+with sidebar_event_area.container():
+    for weekly_event in current_week_events:
+        st.info(
+            f"📢 **Week {current_display_week} Global Event: "
+            f"{weekly_event.get('event_name', 'League Event')}**\n\n"
+            f"{weekly_event.get('description', '')}"
+        )
+    st.info(timing_context["announcement"])
 
+    st.subheader("NFL Teams with Item Effects")
+    if nfl_team_effect_rows:
+        st.dataframe(
+            pd.DataFrame(nfl_team_effect_rows),
+            width="stretch",
+            hide_index=True,
+            height=min(300, 38 + 35 * len(nfl_team_effect_rows)),
+        )
+    else:
+        st.caption("No NFL teams have item effects this week.")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+with selected_week_event_area.container():
+    for weekly_event in weekly_events:
+        st.info(
+            f"📢 **Week {selected_week} Special Event: "
+            f"{weekly_event.get('event_name', 'League Event')}**\n\n"
+            f"{weekly_event.get('description', '')}"
+        )
+
+tab_labels = [
     "🏎️ Weekly Standings",
     "🏆 Overall GP Standings",
     "🧠 Strategize",
-    "👑 Commissioner",
-])
+]
+if st.session_state["is_commissioner"]:
+    tab_labels.append("👑 Commissioner")
+tabs = st.tabs(tab_labels)
+tab1, tab2, tab3 = tabs[:3]
+tab4 = tabs[3] if st.session_state["is_commissioner"] else None
 
 # -----------------------------------------------------------------------------
 # TAB 1: Weekly Mario Kart Race Standings
 # -----------------------------------------------------------------------------
 with tab1:
     st.header(f"Week {selected_week} Race Standings")
-
-    nfl_team_effect_rows = build_weekly_nfl_team_effects(weekly_plays)
-    st.subheader("NFL Teams with Item Effects")
-    if nfl_team_effect_rows:
-        st.dataframe(
-            pd.DataFrame(nfl_team_effect_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.caption("No NFL teams have item effects this week.")
 
     if not calculated_matchups:
         st.info("No score data available for this week yet.")
@@ -972,41 +1469,80 @@ with tab1:
 
         rank_icons = {1: "🥇", 2: "🥈", 3: "🥉"}
 
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stColumn"]:has(
+                [class*="st-key-weekly-item-panel-"]
+            ) {
+                position: relative;
+                align-self: stretch !important;
+            }
+            [class*="st-key-weekly-item-panel-"] {
+                height: 100%;
+                display: flex;
+                flex-direction: column;
+            }
+            [class*="st-key-weekly-item-image-"] {
+                position: absolute;
+                top: 50%;
+                left: 0;
+                width: 100%;
+                transform: translateY(-50%);
+            }
+            [class*="st-key-weekly-item-details-"] {
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                width: 100%;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
         for idx, team in enumerate(leaderboard, start=1):
             r_id = team.get("roster_id")
             t_name = roster_map.get(r_id, f"Team {r_id}")
             t_avatar = avatar_map.get(r_id, sleeper_api.get_avatar_url(None))
             mod_score = team.get("modified_score", 0.0)
             raw_score = team.get("raw_score", 0.0)
-            delta_score = round(mod_score - raw_score, 2)
             effects = team.get("effects", [])
-            gp_pts = scoring.GP_POINTS_MAP.get(idx, 0)
 
             icon = rank_icons.get(idx, "")
 
             with st.container(border=True):
-                st.markdown(
-                    f"<div style='display:flex; align-items:center; gap:0.65rem; "
-                    f"flex-wrap:wrap; margin-bottom:0.6rem;'>"
-                    f"<span style='font-size:1.15rem; font-weight:700;'>"
-                    f"{icon} #{idx}</span>"
-                    f"<span style='color:#ff4b4b; font-weight:700;'>"
-                    f"+{gp_pts} GP Pts</span></div>",
-                    unsafe_allow_html=True,
+                rank_col, avatar_col, name_col, score_col = st.columns(
+                    [0.75, 0.55, 5, 1.5],
+                    gap="small",
+                    vertical_alignment="top",
                 )
-
-                col_avatar, col_info = st.columns([0.65, 5], vertical_alignment="center")
-                with col_avatar:
+                with rank_col:
+                    st.markdown(
+                        f"<div style='font-size:1.5rem; font-weight:700; "
+                        f"line-height:48px; white-space:nowrap;'>"
+                        f"{icon} #{idx}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with avatar_col:
                     st.image(t_avatar, width=48)
+                with name_col:
+                    st.markdown(
+                        f"<div style='font-size:1.35rem; font-weight:700; "
+                        f"line-height:48px;'>"
+                        f"{t_name}</div>",
+                        unsafe_allow_html=True,
+                    )
 
-                with col_info:
-                    st.subheader(t_name)
-                    st.caption(f"Raw {raw_score:.2f} pts")
-
-                modified_score_line = f"**Modified: {mod_score:.2f} pts**"
-                if delta_score != 0:
-                    modified_score_line += f" · {delta_score:+.2f} vs raw"
-                st.markdown(modified_score_line)
+                with score_col:
+                    st.markdown(
+                        f"<div style='text-align:right; padding-top:0.55rem;'>"
+                        f"<div style='font-size:1.25rem; font-weight:700;'>"
+                        f"Score: {mod_score:.2f}</div>"
+                        f"<div style='font-size:0.8rem; color:gray;'>"
+                        f"Raw {raw_score:.2f} pts</div></div>",
+                        unsafe_allow_html=True,
+                    )
 
                 roster_plays = plays_by_roster.get(str(r_id), [])
                 roster_players = sleeper_api.get_roster_players(
@@ -1014,6 +1550,12 @@ with tab1:
                     r_id,
                     matchup_data=matchup_data_by_roster.get(str(r_id)),
                 ) or []
+                roster_players = include_flex_item_players(
+                    roster_players,
+                    revealed_plays_by_roster.get(str(r_id), []),
+                    players_data,
+                    matchup_data_by_roster,
+                )
                 starter_slots = assign_starter_slots(
                     [
                         str(player_id)
@@ -1030,7 +1572,11 @@ with tab1:
                 roster_item = inventory_by_roster.get(str(r_id))
                 item_info = (roster_item or {}).get("items") or {}
 
-                roster_col, manager_item_col = st.columns([3.4, 1.6], gap="medium")
+                manager_item_col, roster_col = st.columns(
+                    [1.2, 3.8],
+                    gap="medium",
+                    vertical_alignment="top",
+                )
                 with roster_col:
                     if effects:
                         st.write("**Active Chaos Effects:**")
@@ -1045,78 +1591,98 @@ with tab1:
                                 team.get("player_scores", {}),
                                 starter_slots,
                                 roster_player_effect_icons.get(str(r_id), {}),
+                                show_injury_status_column=False,
+                                show_inactive_status_icon=True,
                             ),
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                         )
 
                 with manager_item_col:
-                    st.image(
-                        PROJECT_ROOT / "assets" / "item_box.png",
-                        width=48,
+                    item_id = str(
+                        (roster_plays[0].get("item_id") if roster_plays else None)
+                        or (roster_item or {}).get("item_id")
+                        or ""
                     )
-                    if show_weekly_item_details and roster_plays:
-                        item_id = str(roster_plays[0].get("item_id") or "")
-                        item_name = (
-                            item_info.get("name")
-                            or item_names.get(item_id)
-                            or item_id.replace("_", " ").title()
-                            or "Item"
-                        )
-                        st.write(f"**{item_name}**")
-                        for play in roster_plays:
-                            selection = play.get("selection") or {}
-                            if isinstance(selection, str):
-                                try:
-                                    selection = json.loads(selection)
-                                except json.JSONDecodeError:
-                                    selection = {}
-
-                            if selection:
-                                for detail in describe_item_selection(
-                                    selection,
-                                    roster_map,
-                                    players_data,
-                                ):
-                                    st.caption(detail)
-                            else:
-                                target_player_id = str(
-                                    play.get("target_player_id") or ""
+                    item_name = (
+                        item_info.get("name")
+                        or item_names.get(item_id)
+                        or item_id.replace("_", " ").title()
+                        or "Item"
+                    )
+                    item_description = (
+                        item_info.get("description")
+                        or item_descriptions.get(item_id, "")
+                    )
+                    with st.container(key=f"weekly-item-panel-{r_id}"):
+                        with st.container(key=f"weekly-item-image-{r_id}"):
+                            item_image_cols = st.columns([1, 2, 1])
+                            with item_image_cols[1]:
+                                st.image(
+                                    get_item_image_path(item_id),
+                                    width=150,
                                 )
-                                if target_player_id:
-                                    player_info = players_data.get(target_player_id, {})
-                                    choice = (
-                                        player_info.get("full_name")
-                                        or f"{player_info.get('first_name', '')} {player_info.get('last_name', '')}".strip()
-                                        or f"Player {target_player_id}"
-                                    )
-                                else:
-                                    choice = (
-                                        play.get("target_nfl_team")
-                                        or play.get("custom_target")
-                                    )
 
-                                if choice:
-                                    st.caption(f"Choice: {choice}")
-                    elif show_weekly_item_details:
-                        if item_info.get("name"):
-                            st.write(f"**{item_info['name']}**")
-                            st.caption("No item selection recorded.")
-                        else:
-                            st.write("**No items this week**")
-                    else:
-                        st.write("**Manager Item**")
-                        st.caption(timing_context["item_details_message"])
+                        with st.container(key=f"weekly-item-details-{r_id}"):
+                            if show_weekly_item_details and roster_plays:
+                                st.write(f"**{item_name}**")
+                                if item_description:
+                                    st.caption(item_description)
+                                for play in roster_plays:
+                                    selection = play.get("selection") or {}
+                                    if isinstance(selection, str):
+                                        try:
+                                            selection = json.loads(selection)
+                                        except json.JSONDecodeError:
+                                            selection = {}
+
+                                    if selection:
+                                        for detail in describe_item_selection(
+                                            selection,
+                                            roster_map,
+                                            players_data,
+                                        ):
+                                            st.caption(detail)
+                                    else:
+                                        target_player_id = str(
+                                            play.get("target_player_id") or ""
+                                        )
+                                        if target_player_id:
+                                            player_info = players_data.get(
+                                                target_player_id,
+                                                {},
+                                            )
+                                            choice = (
+                                                player_info.get("full_name")
+                                                or (
+                                                    f"{player_info.get('first_name', '')} "
+                                                    f"{player_info.get('last_name', '')}"
+                                                ).strip()
+                                                or f"Player {target_player_id}"
+                                            )
+                                        else:
+                                            choice = (
+                                                play.get("target_nfl_team")
+                                                or play.get("custom_target")
+                                            )
+
+                                        if choice:
+                                            st.caption(f"Choice: {choice}")
+                            elif show_weekly_item_details:
+                                if item_info.get("name"):
+                                    st.write(f"**{item_name}**")
+                                    if item_description:
+                                        st.caption(item_description)
+                                    st.caption("No item selection recorded.")
+                                else:
+                                    st.write("**No items this week**")
+                            else:
+                                st.write("**Manager Item**")
+                                st.caption(timing_context["item_details_message"])
 
 with st.sidebar:
     st.divider()
     st.subheader(f"🎒 Your Week {item_week} Item")
-    auto_selected_notice = st.session_state.pop(
-        "auto_selected_item_notice",
-        None,
-    )
-    if auto_selected_notice:
-        st.success(auto_selected_notice)
 
     if not timing_context["drops_open"]:
         st.info(timing_context["sidebar_message"])
@@ -1125,17 +1691,21 @@ with st.sidebar:
             item_events = weekly_events
         else:
             try:
-                item_events_res = (
-                    supabase.table("league_events")
-                    .select("event_name, description")
-                    .eq("league_id", league_id)
-                    .eq("week", item_week)
-                    .execute()
-                )
-                item_events = item_events_res.data or []
-            except Exception:
+                item_events = weekly_events_by_week.get(item_week, [])
+                if item_week not in weekly_events_by_week:
+                    item_events_res = (
+                        supabase.table("league_events")
+                        .select("week, event_name, description")
+                        .eq("league_id", league_id)
+                        .eq("week", item_week)
+                        .execute()
+                    )
+                    item_events = item_events_res.data or []
+            except Exception as exc:
                 item_events = []
-                st.sidebar.error("Could not load this week's league events.")
+                st.sidebar.error(
+                    f"Could not load this week's league events: {exc}"
+                )
 
         item_unavailable_reason = item_service.get_item_unavailable_reason(
             item_week,
@@ -1167,20 +1737,22 @@ with st.sidebar:
                 )
             else:
                 try:
-                    previous_week_matchups = {
+                    standings_matchups_by_week = {
                         week: get_week_matchups(week)
                         for week in range(1, item_week)
                     }
                     previous_week_plays = [
-                        play for play in all_plays
+                        play for play in revealed_all_plays
                         if play.get("week", 0) < item_week
                     ]
-                    if any(previous_week_matchups.values()):
+                    if any(standings_matchups_by_week.values()):
                         previous_gp_standings = scoring.calculate_gp_standings(
-                            previous_week_matchups,
+                            standings_matchups_by_week,
                             previous_week_plays,
                             players_data,
                             list(roster_map),
+                            fallback_player_points_by_week,
+                            weekly_events_by_week,
                         )
                     else:
                         previous_gp_standings = []
@@ -1237,7 +1809,10 @@ with st.sidebar:
             else:
                 sidebar_item = sidebar_inventory[0]
                 sidebar_item_info = sidebar_item.get("items") or {}
-                st.image(PROJECT_ROOT / "assets" / "item_box.png", width=56)
+                st.image(
+                    get_item_image_path(sidebar_item.get("item_id")),
+                    width=56,
+                )
                 st.write(f"**{sidebar_item_info.get('name', 'Your item')}**")
                 st.caption(sidebar_item_info.get("description", ""))
                 active_preview = st.session_state.get("item_preview")
@@ -1281,16 +1856,42 @@ with st.sidebar:
                             st.rerun()
 
                         if action == "lock_in":
-                            save_item_play(
-                                sidebar_item,
-                                selection,
-                                league_id,
-                                item_week,
-                                st.session_state["roster_id"],
-                            )
-                            st.session_state.pop("item_preview", None)
-                            st.sidebar.success("Selection saved.")
-                            st.rerun()
+                            try:
+                                save_item_play(
+                                    sidebar_item,
+                                    selection,
+                                    league_id,
+                                    item_week,
+                                    st.session_state["roster_id"],
+                                )
+                            except ValueError as exc:
+                                st.sidebar.error(str(exc))
+                            else:
+                                st.session_state.pop("item_preview", None)
+                                st.sidebar.success("Selection saved.")
+                                st.rerun()
+
+    st.divider()
+    st.selectbox(
+        "Active league",
+        list(active_league_options),
+        key="active_league_selection",
+    )
+    st.write(f"Logged in as: **{st.session_state['team_name']}**")
+    if st.button("Log Out", key="sidebar_log_out"):
+        remember_token = st.session_state.get("remember_token") or cookie_manager.get(AUTH_COOKIE_NAME)
+        revoke_login_session(supabase, remember_token)
+        st.session_state["pending_cookie_delete"] = True
+        st.session_state["authenticated"] = False
+        st.session_state["roster_id"] = None
+        st.session_state["team_name"] = None
+        st.session_state["is_commissioner"] = False
+        st.session_state["user_id"] = None
+        st.session_state["active_league_id"] = None
+        st.session_state["active_league_selection"] = None
+        st.session_state["remember_token"] = None
+        st.session_state["login_rosters"] = []
+        st.rerun()
 
     st.divider()
     st.subheader("Timing test")
@@ -1335,11 +1936,13 @@ with tab2:
                 for week in range(1, selected_week + 1)
             },
             [
-                play for play in all_plays
+                play for play in revealed_all_plays
                 if play.get("week", 0) <= selected_week
             ],
             players_data,
             list(roster_map),
+            fallback_player_points_by_week,
+            weekly_events_by_week,
         )
         season_totals = {
             team["roster_id"]: team["gp_points"]
@@ -1348,6 +1951,18 @@ with tab2:
         season_raw_pts = {
             team["roster_id"]: team["modified_score"]
             for team in gp_standings
+        }
+        weekly_leaderboard = sorted(
+            calculated_matchups,
+            key=lambda team: (
+                team.get("modified_score", 0.0),
+                team.get("raw_score", 0.0),
+            ),
+            reverse=True,
+        )
+        weekly_gp_points = {
+            team.get("roster_id"): scoring.GP_POINTS_MAP.get(rank, 0)
+            for rank, team in enumerate(weekly_leaderboard, start=1)
         }
 
         overall_leaderboard = sorted(
@@ -1360,6 +1975,7 @@ with tab2:
 
         for idx, (r_id, t_name) in enumerate(overall_leaderboard, start=1):
             gp_pts = season_totals.get(r_id, 0)
+            this_week_gp_pts = weekly_gp_points.get(r_id, 0)
             total_fantasy_pts = season_raw_pts.get(r_id, 0.0)
             t_avatar = avatar_map.get(r_id, sleeper_api.get_avatar_url(None))
             icon = rank_icons.get(idx, "")
@@ -1387,6 +2003,7 @@ with tab2:
                         st.metric(
                             label="Total GP Points",
                             value=f"{gp_pts} pts",
+                            delta=f"+{this_week_gp_pts} GP pts this week",
                         )
 
 # -----------------------------------------------------------------------------
@@ -1404,12 +2021,21 @@ with tab3:
         user_roster_id,
         matchup_data=matchup_data_by_roster.get(str(user_roster_id)),
     ) or []
+    user_roster_players = include_flex_item_players(
+        user_roster_players,
+        modifier_plays,
+        players_data,
+        matchup_data_by_roster,
+    )
     if user_roster_players:
         strategize_calculated_matchups = scoring.calculate_modified_scores(
             raw_matchups,
             modifier_plays,
             players_data,
             previous_week_matchups,
+            fallback_player_points_by_week.get(selected_week, {}),
+            fallback_player_points_by_week.get(selected_week - 1, {}),
+            weekly_events,
         )
         strategize_team = next(
             (
@@ -1440,7 +2066,7 @@ with tab3:
                     strategize_starter_slots,
                     roster_player_effect_icons.get(str(user_roster_id), {}),
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1557,8 +2183,394 @@ with tab3:
 # -----------------------------------------------------------------------------
 # TAB 4: Commissioner Administration
 # -----------------------------------------------------------------------------
+if not st.session_state["is_commissioner"]:
+    st.stop()
+
 with tab4:
-    st.header("👑 Commissioner Tools")
-    st.info(
-        "🛠️ Commissioner panel pending specification. Let me know what administrative features you'd like to include here!"
+    st.header(f"👑 Commissioner Tools · Week {selected_week}")
+    saved_score_notice = st.session_state.pop(
+        "player_score_saved_notice",
+        None,
     )
+    if saved_score_notice:
+        st.success(f"Saved raw score for {saved_score_notice}.")
+    if fallback_score_error:
+        st.error(
+            "Commissioner-entered player scores could not be loaded. Verify "
+            "the player_score_inputs table migration and Supabase connection. "
+            f"Details: {fallback_score_error}"
+        )
+
+    previous_gp_standings = []
+    if selected_week > 1 and not all_plays_error:
+        try:
+            commissioner_matchups_by_week = {
+                week: get_week_matchups(week)
+                for week in range(1, selected_week)
+            }
+            previous_week_plays = [
+                play
+                for play in revealed_all_plays
+                if int(play.get("week") or 0) < selected_week
+            ]
+            if any(commissioner_matchups_by_week.values()):
+                previous_gp_standings = scoring.calculate_gp_standings(
+                    commissioner_matchups_by_week,
+                    previous_week_plays,
+                    players_data,
+                    list(roster_map),
+                    fallback_player_points_by_week,
+                    weekly_events_by_week,
+                )
+        except Exception as exc:
+            st.error(f"Could not calculate previous GP standings: {exc}")
+    elif selected_week > 1 and all_plays_error:
+        st.error(f"Could not load prior item plays for GP ordering: {all_plays_error}")
+
+    gp_rank_by_roster = {
+        str(team["roster_id"]): rank
+        for rank, team in enumerate(previous_gp_standings, start=1)
+    }
+
+    def commissioner_order_key(record: dict) -> tuple[int, str, str]:
+        roster_id = str(record.get("roster_id"))
+        team_name = next(
+            (
+                name for key, name in roster_map.items()
+                if str(key) == roster_id
+            ),
+            f"Roster {roster_id}",
+        )
+        return (
+            gp_rank_by_roster.get(roster_id, len(roster_map) + 1),
+            str(team_name).casefold(),
+            str(record.get("item_id") or ""),
+        )
+
+    if not gp_rank_by_roster:
+        st.caption(
+            "Previous-week GP standings are unavailable; teams are listed "
+            "alphabetically."
+        )
+
+    st.subheader(
+        "Weekly item choices" if show_weekly_item_details
+        else "Weekly item lock-in status"
+    )
+    plays_by_roster_item = {
+        (str(play.get("roster_id")), str(play.get("item_id"))): play
+        for play in weekly_plays
+    }
+    lock_in_window_open = (
+        timing_context["week"] == selected_week
+        and timing_context["weekday"] in {1, 2}
+    )
+    item_records = []
+    inventory_item_keys = set()
+    for item in weekly_inventory:
+        roster_id = str(item.get("roster_id"))
+        item_id = str(item.get("item_id") or "")
+        item_key = (roster_id, item_id)
+        inventory_item_keys.add(item_key)
+        play = plays_by_roster_item.get(item_key)
+        selection = _commissioner_selection(play) if play else {}
+        selection_details = (
+            describe_item_selection(selection, roster_map, players_data)
+            if selection
+            else []
+        )
+        if play and not selection_details:
+            selection_text = (
+                "No selection required"
+                if selection.get("mode") == "none"
+                else "Selection recorded"
+            )
+        elif selection_details:
+            selection_text = "; ".join(selection_details)
+        elif play:
+            selection_text = "No selection details recorded"
+        else:
+            selection_text = (
+                "Pending selection"
+                if lock_in_window_open
+                else "No selection recorded"
+            )
+
+        item_records.append({
+            "roster_id": roster_id,
+            "item_id": item_id,
+            "Manager": next(
+                (
+                    name for key, name in roster_map.items()
+                    if str(key) == roster_id
+                ),
+                f"Roster {roster_id}",
+            ),
+            "Item": (
+                item_names.get(item_id)
+                or item_id.replace("_", " ").title()
+                or "Item"
+            ),
+            "Selection": selection_text,
+            "Lock-in Status": (
+                "Autogenerated (late)"
+                if selection.get("auto_selected")
+                else "Locked in"
+            ) if play else (
+                "Pending selection"
+                if lock_in_window_open
+                else "No selection recorded"
+            ),
+        })
+
+    for item_key, play in plays_by_roster_item.items():
+        if item_key in inventory_item_keys:
+            continue
+        roster_id, item_id = item_key
+        selection = _commissioner_selection(play)
+        selection_details = (
+            describe_item_selection(selection, roster_map, players_data)
+            if selection
+            else []
+        )
+        item_records.append({
+            "roster_id": roster_id,
+            "item_id": item_id,
+            "Manager": next(
+                (
+                    name for key, name in roster_map.items()
+                    if str(key) == roster_id
+                ),
+                f"Roster {roster_id}",
+            ),
+            "Item": (
+                item_names.get(item_id)
+                or item_id.replace("_", " ").title()
+                or "Item"
+            ),
+            "Selection": (
+                "; ".join(selection_details)
+                or (
+                    "No selection required"
+                    if selection.get("mode") == "none"
+                    else "No selection details recorded"
+                )
+            ),
+            "Lock-in Status": (
+                "Autogenerated (late)"
+                if selection.get("auto_selected")
+                else "Locked in"
+            ),
+        })
+
+    item_records.sort(key=commissioner_order_key)
+    if item_records:
+        st.dataframe(
+            pd.DataFrame(item_records)[
+                ["Manager", "Item", "Selection", "Lock-in Status"]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.caption("No item drops or choices are recorded for this week.")
+
+    st.divider()
+    left_column, right_column = st.columns(2, gap="large")
+    with left_column:
+        st.subheader("Weekly item recap · previous week's GP order")
+        ordered_plays = sorted(weekly_plays, key=commissioner_order_key)
+        report_lines = []
+        for play in ordered_plays:
+            roster_id = str(play.get("roster_id"))
+            team_name = next(
+                (
+                    name for key, name in roster_map.items()
+                    if str(key) == roster_id
+                ),
+                f"Roster {roster_id}",
+            )
+            item_id = str(play.get("item_id") or "")
+            item_name = (
+                item_names.get(item_id)
+                or item_id.replace("_", " ").title()
+                or "Item"
+            )
+            report_lines.append(
+                _commissioner_item_summary(
+                    team_name,
+                    item_name,
+                    play,
+                    roster_map,
+                    players_data,
+                    item_descriptions.get(item_id, ""),
+                )
+            )
+        st.text_area(
+            "Copy and paste this week's item choices (ordered by previous week's GP standings)",
+            value="\n".join(report_lines)
+            or "No item choices have been recorded this week.",
+            height=320,
+            key=f"commissioner_item_recap_{league_id}_{selected_week}",
+        )
+
+    with right_column:
+        st.subheader("Commissioner to-do list")
+        st.caption("Checklist marks are kept for this app session.")
+        checkbox_item_ids = {
+            "COIN",
+            "MASTER_BALL",
+            "RECALL",
+            "SMASH_BALL",
+        }
+        checklist_plays = [
+            play for play in ordered_plays
+            if str(play.get("item_id") or "").upper() in checkbox_item_ids
+        ]
+        if checklist_plays:
+            for play in checklist_plays:
+                roster_id = str(play.get("roster_id"))
+                team_name = next(
+                    (
+                        name for key, name in roster_map.items()
+                        if str(key) == roster_id
+                    ),
+                    f"Roster {roster_id}",
+                )
+                item_id = str(play.get("item_id") or "").upper()
+                item_name = (
+                    item_names.get(item_id)
+                    or item_id.replace("_", " ").title()
+                    or "Item"
+                )
+                todo_label = _commissioner_item_summary(
+                    team_name,
+                    item_name,
+                    play,
+                    roster_map,
+                    players_data,
+                    item_descriptions.get(item_id, ""),
+                )
+                if item_id == "COIN":
+                    custom_target = play.get("custom_target")
+                    try:
+                        coin_target = (
+                            json.loads(custom_target)
+                            if isinstance(custom_target, str)
+                            else {}
+                        )
+                    except json.JSONDecodeError:
+                        coin_target = {}
+                    if not isinstance(coin_target, dict):
+                        coin_target = {}
+                    stored_amount = coin_target.get("coin_faab_amount")
+                    coin_target = item_service.ensure_coin_faab_amount(
+                        coin_target
+                    )
+                    coin_amount = coin_target["coin_faab_amount"]
+                    if stored_amount != coin_amount:
+                        coin_target.setdefault("mode", "none")
+                        try:
+                            supabase.table("weekly_plays").update({
+                                "custom_target": json.dumps(coin_target)
+                            }).eq("id", play.get("id")).eq(
+                                "league_id", league_id
+                            ).execute()
+                            play["custom_target"] = json.dumps(coin_target)
+                        except APIError as exc:
+                            st.error(
+                                "Could not save this Coin's FAAB amount to "
+                                f"the weekly play: {exc}"
+                            )
+                            coin_amount = None
+                    if coin_amount is None:
+                        todo_label = (
+                            "Coin FAAB amount could not be saved; resolve the "
+                            "database error before applying it in Sleeper: "
+                            f"{todo_label}"
+                        )
+                    else:
+                        todo_label = (
+                            f"Apply {coin_amount} FAAB in Sleeper: {todo_label}"
+                        )
+                elif item_id == "MASTER_BALL":
+                    todo_label = f"Make this Master Ball trade in Sleeper: {todo_label}"
+                st.checkbox(
+                    todo_label,
+                    key=(
+                        f"commissioner_todo_{league_id}_{selected_week}_"
+                        f"{roster_id}_{item_id}"
+                    ),
+                )
+        else:
+            st.caption("No Coin, Master Ball, Recall, or Smash Ball items this week.")
+
+        missing_score_targets = scoring.get_missing_item_player_score_targets(
+            weekly_plays,
+            raw_matchups,
+            previous_week_matchups,
+            players_data,
+            selected_week,
+            fallback_player_points_by_week,
+        )
+        unique_missing_score_targets = {}
+        for target in missing_score_targets:
+            target_key = (
+                target["scoring_week"],
+                target["player_key"],
+            )
+            unique_missing_score_targets.setdefault(target_key, target)
+
+        st.subheader("Missing player scores")
+        if unique_missing_score_targets:
+            st.caption(
+                "Sleeper matchup scores are checked across every league roster "
+                "first. Enter the player's raw weekly points only when Sleeper "
+                "does not provide a score."
+            )
+            for (score_week, player_key), target in unique_missing_score_targets.items():
+                score_label = (
+                    f"{target['player_name']} · Week {score_week} · "
+                    f"{target['item_label']}"
+                )
+                with st.form(
+                    key=(
+                        f"commissioner_player_score_{league_id}_{score_week}_"
+                        f"{player_key}"
+                    )
+                ):
+                    st.caption(score_label)
+                    raw_points_text = st.text_input(
+                        "Raw weekly fantasy points",
+                        key=(
+                            f"commissioner_player_score_value_{league_id}_"
+                            f"{score_week}_{player_key}"
+                        ),
+                    )
+                    score_submitted = st.form_submit_button("Save raw score")
+                if score_submitted:
+                    try:
+                        raw_points = float(raw_points_text)
+                    except ValueError:
+                        st.error("Enter a valid numeric score before saving.")
+                    else:
+                        try:
+                            save_player_score_input(
+                                supabase,
+                                league_id,
+                                score_week,
+                                target["player_id"],
+                                target["player_name"],
+                                raw_points,
+                            )
+                        except Exception as exc:
+                            st.error(f"Could not save the player score: {exc}")
+                        else:
+                            st.session_state["player_score_saved_notice"] = (
+                                score_label
+                            )
+                            st.rerun()
+        else:
+            st.caption(
+                "No selected player targets are missing weekly scores."
+            )

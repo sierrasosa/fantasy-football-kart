@@ -34,6 +34,16 @@ NFL_DIVISION_TEAMS = {
     "NFC West": ("ARI", "LAR", "SF", "SEA"),
 }
 
+
+def format_nfl_division(division: object) -> str:
+    """Format a division with its team abbreviations."""
+    division_name = str(division or "").strip()
+    teams = NFL_DIVISION_TEAMS.get(division_name)
+    if not teams:
+        return division_name
+    return f"{division_name} ({', '.join(teams)})"
+
+
 NFL_TEAM_NAMES = {
     "ARI": "Arizona Cardinals",
     "ATL": "Atlanta Falcons",

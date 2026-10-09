@@ -43,6 +43,7 @@ The app exposes a sidebar widget for picking the NFL week:
 
 - `selected_week = st.sidebar.number_input(...)`
 - It is limited to 1 through 18.
+- Its initial value comes from Sleeper's NFL state `display_week`.
 
 The active league ID comes from the authenticated manager's selected roster, not a single fixed secret.
 
@@ -50,7 +51,7 @@ This means the rest of the app calculates data for whatever week the user select
 
 ## 4. Loading live fantasy data
 
-The app loads three primary data sources:
+The app loads several primary data sources:
 
 ### a) NFL player database
 
@@ -73,32 +74,52 @@ This returns raw Sleeper matchup data for the selected week.
 
 It queries Supabase for `weekly_plays` rows matching the current week.
 
-This data tells the app which players/items were used by each roster and what they targeted. Queries and writes for rosters, weekly plays, inventory, and events include the active `league_id` so separate leagues remain isolated.
+This data tells the app which players/items were used by each roster and what they targeted. Locked-in plays remain saved for status and are applied to scoring and item effects only after the item's Thursday reveal. Only one NFL Division Bye can be locked in and applied per league week. Queries and writes for rosters, weekly plays, inventory, and events include the active `league_id` so separate leagues remain isolated.
+Coin drops receive a random 5–15 FAAB amount when weekly inventory is
+locked in. The amount is saved in the weekly play's `custom_target` and shown
+in the commissioner's Sleeper checklist.
+
+### d) Commissioner-entered player scores
+
+Commissioner-entered raw scores are stored in the league-scoped
+`player_score_inputs` table. Sleeper matchup points from every roster take
+precedence; saved scores are used only when matchup data has no score for the
+selected player. Player IDs are used when available, otherwise a normalized
+player name identifies the score. Apply
+`database/supabase_migrate_player_score_inputs.sql` to an existing Supabase
+project before using this fallback.
 
 ## 5. Scoring modifier flow
 
-The app calls the scoring function:
+The app calls the scoring function with current- and previous-week fallback
+score maps:
 
-- `scoring.calculate_modified_scores(raw_matchups, weekly_plays, players_data)`
+- `scoring.calculate_modified_scores(raw_matchups, revealed_weekly_plays, players_data, previous_week_matchups, current_week_fallback_scores, previous_week_fallback_scores)`
 
 This is the main scoring engine for affecting scores with custom item mechanics. The function is defined in [game_logic/scoring.py](game_logic/scoring.py).
 
 The scoring logic starts with Sleeper's team score, then adjusts starter points
-for team/division byes and supercharges, Superstar, and Snow Game/Dome Game.
+for team/division byes and supercharges, Rookie of the Week, Superstar, and
+Snow Game/Dome Game. Rookie of the Week doubles eligible rookies' scores in the
+weeks when that event is scheduled.
 Snow Game/Dome Game affects only the roster's RBs and WRs: the selected
 position receives 2x and the other of those two positions receives 0.5x;
 other positions are unchanged.
-Mushroom, Hyperflex, Ultraflex (for NFL players in the player database), and
+Mushroom, Hyperflex, Ultraflex, and
 Golden Mushroom add eligible player points. Bullet Bill uses the chosen
-player's adjusted points ten times; Smash Ball replaces the team's score with
-its chosen dream lineup, ignoring team/division bye effects for that lineup.
+player's adjusted points ten times; its roster display shows ten active copies
+of that player at the normal individual score, so the displayed player scores
+sum to the same total. Smash Ball replaces the team's score with its chosen
+dream lineup, ignoring team/division bye effects for that lineup.
 Recall replaces one current starter's score with that player's score from the
-previous week.
+previous week. When Sleeper does not provide a selected player's score,
+commissioners can enter the raw weekly points in the Commissioner tab; the
+entry is persisted and applied to live, strategize, and GP standings.
 Scores return with `roster_id`, `raw_score`, `modified_score`, and an `effects`
 breakdown.
 
-Master Ball trades, Shell/Triple Shell transfers, non-NFL Ultraflex players,
-and league-wide scoring events still need scoring implementation.
+Master Ball trades, Shell/Triple Shell transfers, and league-wide scoring
+events still need scoring implementation.
 Those pending item mechanics are called out in the effects breakdown rather
 than silently changing a score.
 
@@ -171,7 +192,11 @@ shows each player's score after implemented modifiers. Starter labels include
 the assigned league lineup slot (for example, `FLEX 1 · RB`); bench labels
 continue to show the player's position. Starters are ordered by lineup slot:
 QB, RB, WR, TE, FLEX, K, and DEF, with numbered slots in ascending order;
-bench players follow. Effect icons appear after affected player names in the
+bench players follow. Revealed Mushroom, Hyperflex, and Ultraflex selections
+appear as active players, before regular bench rows, when the selected player
+is not already on the roster; an existing roster player selected for one of
+these items is also marked active.
+Effect icons appear after affected player names in the
 roster and player database: 🚫 bye (shown as `0x`), ✨ supercharge, 🍄 mushroom,
 ❄️ snow game, 🏟️ dome game, 🔄 Recall, ♾️ Hyperflex/Ultraflex, ⭐ Superstar,
 🚀 Bullet Bill, and 🪩 Smash Ball. Master Ball has no icon. Shell icons are not
@@ -222,7 +247,28 @@ event rows.
 
 ## 11. Tab 4: Commissioner tools
 
-This tab is a placeholder UI for future commissioner functionality. It currently only shows a message indicating that admin features are pending specification.
+The Commissioner tab is only added for the active league roster when its
+Supabase `commissioner` flag is true. The commissioner view also has a server
+execution guard; manager roles are refreshed when the active league changes
+and cleared on logout.
+
+The commissioner tab shows a table of weekly item choices at the top with
+manager, item, selection, and lock-in status. During the Tuesday-Wednesday
+lock-in window, unplayed items show `Pending selection`; saved manager plays
+show `Locked in`; and deadline-generated plays show `Autogenerated (late)`.
+Outside the lock-in window, items without a play show `No selection recorded`.
+The table, recap, and checklist are ordered by
+cumulative GP standings through the previous week. The left column provides a
+copyable weekly item recap. The right column includes session-only checkboxes
+for Coin, Master Ball, Recall, and Smash Ball plays. Player-score handling is
+shown in the missing-score section. Automatic-selection notices are shown in
+the table rather than in the sidebar.
+Coin and Master Ball checklist entries explicitly remind the commissioner to
+apply the effect or make the trade in Sleeper; those changes cannot be made
+automatically. The to-do list also identifies selected player targets without
+a score in any league matchup. The commissioner can enter the raw score for
+the relevant week (including the prior week for Recall); scores are saved by
+league/week and player ID or normalized name and immediately refresh scoring.
 
 ## 13. Overall app architecture
 
@@ -231,7 +277,9 @@ The app combines a few layers:
 - Streamlit UI layer: all visible tabs and forms
 - `database/auth_service.py`: PIN hashing/verification and persistent login rate limiting
 - `database/league_service.py`: roster lookup, commissioner league discovery, and league initialization persistence
+- `database/player_score_service.py`: league-scoped commissioner score persistence
 - `game_logic/item_service.py`: league-scoped event checks and weekly item-drop persistence
+- `game_logic/player_scores.py`: normalized identity keys for score fallbacks
 - `helpers/sleeper_api.py`: Sleeper account, league, roster, and player data
 - Supabase service client: persistent roster, inventory, weekly plays, and event data
 - custom scoring logic: modifying raw fantasy points using item effects
